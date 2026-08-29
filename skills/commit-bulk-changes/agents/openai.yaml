@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit Bulk Changes"
+  short_description: "Group and commit working tree changes safely"
+  default_prompt: "Use $commit-bulk-changes to inspect the Git working tree, cluster changes into logical groups, follow active commit conventions or use Conventional Commits by default, and safely execute approved commits."

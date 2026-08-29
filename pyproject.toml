@@ -1,0 +1,13 @@
+[project]
+name = "maximiliamus-skills"
+version = "0.1.0"
+description = "Shared reusable agent skills collection"
+requires-python = ">=3.14"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"

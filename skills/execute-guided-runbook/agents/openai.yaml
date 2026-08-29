@@ -1,0 +1,4 @@
+interface:
+  display_name: "Execute Guided Runbook"
+  short_description: "Run repository runbooks with resumable local sessions"
+  default_prompt: "Use $execute-guided-runbook to run or resume a repository runbook step by step."
