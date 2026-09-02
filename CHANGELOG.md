@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-02
+
 - Expand `execute-guided-runbook` with structured acceptance policies,
   arbitrary or sequential step ordering, scored outcomes, flat frontmatter,
   safe session identity migration, and explicit archive pruning.
