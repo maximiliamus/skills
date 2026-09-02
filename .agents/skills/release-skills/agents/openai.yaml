@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Skills"
+  short_description: "Validate, tag, and publish a skills release"
+  default_prompt: "Use $release-skills to prepare, validate, tag, and atomically push the next skills repository release."

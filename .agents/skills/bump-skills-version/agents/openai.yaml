@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bump Skills Version"
+  short_description: "Update the skills version and changelog safely"
+  default_prompt: "Use $bump-skills-version to prepare the next skills repository version and changelog entry."

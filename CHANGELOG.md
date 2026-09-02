@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   safe session identity migration, and explicit archive pruning.
 - Keep the runbook helper dependency-free with a strict minimal parser for the
   supported frontmatter properties.
+- Add repository-local skills for deterministic version bumps and guarded
+  releases.
+- Move release guidance into the internal release skill, align it with the
+  repository's `master` branch, and require post-bump validation.
 
 ## [0.1.0] - 2026-08-30
 

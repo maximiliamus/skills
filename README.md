@@ -36,7 +36,6 @@ cp -R skills/<skill-name> .agents/skills/<skill-name>
 
 ## Documentation & Maintenance
 
-- [Releasing & Tagging Guide](./docs/RELEASING.md)
 - [Changelog](./CHANGELOG.md)
 
 ## License
