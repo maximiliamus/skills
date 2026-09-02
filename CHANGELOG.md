@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Expand `execute-guided-runbook` with structured acceptance policies,
+  arbitrary or sequential step ordering, scored outcomes, flat frontmatter,
+  safe session identity migration, and explicit archive pruning.
+- Keep the runbook helper dependency-free with a strict minimal parser for the
+  supported frontmatter properties.
+
 ## [0.1.0] - 2026-08-30
 
 - Add `commit-bulk-changes` for safe, well-scoped commits, including scoped or

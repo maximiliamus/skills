@@ -13,6 +13,14 @@ EFFORT_LEVELS = {"low", "medium", "high", "extra"}
 DEFAULT_EFFORT_LEVEL = "medium"
 MODEL_TIERS = {"light", "medium", "heavy"}
 DEFAULT_MODEL_TIER = "medium"
+ACCEPTANCE_POLICIES = {"strict", "flexible", "always"}
+DEFAULT_ACCEPTANCE_POLICY = "flexible"
+STEP_ORDERS = {"sequential", "arbitrary"}
+DEFAULT_STEP_ORDER = "sequential"
+STEP_RESULTS = {"PASS", "FAIL", "SKIPPED"}
+ASSESSMENT_RESULTS = {"PASSED", "ACCEPTED", "PARTIAL", "REJECTED"}
+OPERATOR_DECISIONS = {"accept", "reject"}
+ASSESSMENT_VERSION = 1
 LOCK_DIRECTORY_NAME = ".locks"
 LOCK_TIMEOUT_SECONDS = 10.0
 LOCK_POLL_SECONDS = 0.05
@@ -27,6 +35,12 @@ REGISTRY_FIELDS = {
     "effortLevel",
     "modelTier",
 }
+
+
+def valid_acceptance_threshold(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    return re.fullmatch(r"(?:100|[1-9][0-9]?)%", value) is not None
 
 
 class RunbookError(RuntimeError):

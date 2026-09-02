@@ -8,7 +8,7 @@ import os
 import stat
 import subprocess
 import sys
-from datetime import UTC
+from datetime import UTC, timedelta
 from datetime import datetime as real_datetime
 from pathlib import Path
 from types import ModuleType
@@ -126,9 +126,10 @@ def test_list_with_registry_uses_registry_lock(repo: Path, monkeypatch: pytest.M
         locked_targets.append(target)
         return RecordingLock()
 
-    def assert_locked(registry: dict[str, dict[str, str]]):
+    def assert_locked(registry: dict[str, dict[str, str]], repo_root: Path):
         assert lock_active
         assert registry == {}
+        assert repo_root == repo.resolve()
 
     monkeypatch.setattr(module.cli, "interprocess_lock", recording_lock)
     monkeypatch.setattr(module.cli, "command_list", assert_locked)
@@ -214,6 +215,9 @@ def test_register_and_run_lifecycle(repo: Path):
     assert session_data["runbookId"] == "sample-deploy"
     assert session_data["effortLevel"] == "medium"
     assert session_data["modelTier"] == "medium"
+    assert session_data["acceptancePolicy"] == "flexible"
+    assert session_data["stepOrder"] == "sequential"
+    assert session_data["acceptanceThreshold"] is None
     assert "statePath" in session_data
 
     # Set step
@@ -230,17 +234,37 @@ def test_register_and_run_lifecycle(repo: Path):
     assert step_data["currentStep"]["id"] == "phase-1.1"
 
     # Complete step
-    res = run_cli(repo, "complete", "sample-deploy", "--evidence", "Verified cluster ready")
+    res = run_cli(
+        repo,
+        "complete",
+        "sample-deploy",
+        "--evidence",
+        "Verified cluster ready",
+        "--result",
+        "pass",
+        "--score",
+        "1/1",
+    )
     assert res.returncode == 0
     comp_data = json.loads(res.stdout)
     assert len(comp_data["history"]) == 1
     assert comp_data["history"][0]["status"] == "completed"
 
     # Finish runbook
-    res = run_cli(repo, "finish", "sample-deploy", "--evidence", "All phases verified")
+    res = run_cli(
+        repo,
+        "finish",
+        "sample-deploy",
+        "--evidence",
+        "All phases verified",
+        "--expected-step",
+        "phase-1.1",
+    )
     assert res.returncode == 0
     fin_data = json.loads(res.stdout)
     assert fin_data["status"] == "completed"
+    assert fin_data["result"] == "PASSED"
+    assert fin_data["score"]["display"] == "1/1 (100%)"
 
     # Status check
     res = run_cli(repo, "status", "sample-deploy")
@@ -302,8 +326,32 @@ def test_status_marks_completed_older_revision_as_outdated(repo: Path):
     runbook_md.write_text("# Release\n\nOriginal instructions\n", encoding="utf-8")
     assert run_cli(repo, "register", "release", "release.md").returncode == 0
     started = json.loads(run_cli(repo, "run", "release").stdout)
+    assert run_cli(repo, "step", "release", "step-1", "--title", "Step 1").returncode == 0
     assert (
-        run_cli(repo, "finish", "release", "--evidence", "Original revision done").returncode == 0
+        run_cli(
+            repo,
+            "complete",
+            "release",
+            "--evidence",
+            "Original revision done",
+            "--result",
+            "pass",
+            "--score",
+            "1/1",
+        ).returncode
+        == 0
+    )
+    assert (
+        run_cli(
+            repo,
+            "finish",
+            "release",
+            "--evidence",
+            "Original revision done",
+            "--expected-step",
+            "step-1",
+        ).returncode
+        == 0
     )
 
     runbook_md.write_text("# Release\n\nNew required step\n", encoding="utf-8")
@@ -629,7 +677,15 @@ def test_step_block_and_skip_history(repo: Path):
     assert block_data["currentStep"]["blockReason"] == "Waiting for database credentials"
 
     # Skip step
-    res_skip = run_cli(repo, "skip", "pipeline", "--reason", "Manual bypass authorized")
+    res_skip = run_cli(
+        repo,
+        "skip",
+        "pipeline",
+        "--reason",
+        "Manual bypass authorized",
+        "--score",
+        "0/1",
+    )
     assert res_skip.returncode == 0
     skip_data = json.loads(res_skip.stdout)
     assert skip_data["currentStep"] is None
@@ -678,7 +734,17 @@ def test_outdated_runbook_decision_continue(repo: Path):
     run_cli(repo, "register", "evolving", "docs/evolving.md")
     run_cli(repo, "run", "evolving")
     run_cli(repo, "step", "evolving", "step-1", "--title", "First step")
-    run_cli(repo, "complete", "evolving", "--evidence", "Done")
+    run_cli(
+        repo,
+        "complete",
+        "evolving",
+        "--evidence",
+        "Done",
+        "--result",
+        "pass",
+        "--score",
+        "1/1",
+    )
 
     # Modify markdown file while session is active
     runbook_md.write_text("# Revised Version\n\nStep 1\nStep 2\n", encoding="utf-8")
@@ -736,8 +802,26 @@ def test_restart_same_revision(repo: Path):
     run_cli(repo, "register", "repeatable", "docs/repeatable.md")
     run_cli(repo, "run", "repeatable")
     run_cli(repo, "step", "repeatable", "step-1", "--title", "Step 1")
-    run_cli(repo, "complete", "repeatable", "--evidence", "Done")
-    run_cli(repo, "finish", "repeatable", "--evidence", "Finished")
+    run_cli(
+        repo,
+        "complete",
+        "repeatable",
+        "--evidence",
+        "Done",
+        "--result",
+        "pass",
+        "--score",
+        "1/1",
+    )
+    run_cli(
+        repo,
+        "finish",
+        "repeatable",
+        "--evidence",
+        "Finished",
+        "--expected-step",
+        "step-1",
+    )
 
     # Restart
     res_restart = run_cli(repo, "run", "repeatable", "--restart")
@@ -746,6 +830,152 @@ def test_restart_same_revision(repo: Path):
     assert restart_data["status"] == "active"
     assert restart_data["currentStep"] is None
     assert restart_data["history"] == []
+
+
+def test_prune_keep_last_previews_then_deletes_only_selected_runbook(repo: Path):
+    docs_dir = repo / "docs"
+    docs_dir.mkdir(parents=True)
+    for runbook_id in ("alpha", "beta"):
+        (docs_dir / f"{runbook_id}.md").write_text(
+            f"# {runbook_id.title()}\n",
+            encoding="utf-8",
+        )
+        assert (
+            run_cli(
+                repo,
+                "register",
+                runbook_id,
+                f"docs/{runbook_id}.md",
+            ).returncode
+            == 0
+        )
+        assert run_cli(repo, "run", runbook_id).returncode == 0
+
+    for _ in range(3):
+        assert run_cli(repo, "run", "alpha", "--restart").returncode == 0
+    assert run_cli(repo, "run", "beta", "--restart").returncode == 0
+
+    archive_dir = repo / ".runbooks" / "archive"
+    alpha_archives = list(archive_dir.glob("alpha.*.json"))
+    beta_archives = list(archive_dir.glob("beta.*.json"))
+    current_ledger = (repo / ".runbooks" / "alpha.json").read_bytes()
+    assert len(alpha_archives) == 3
+    assert len(beta_archives) == 1
+    newest_alpha_archive = max(alpha_archives, key=lambda archive: archive.name)
+
+    preview = run_cli(repo, "prune", "alpha", "--keep-last", "1", "--dry-run")
+
+    assert preview.returncode == 0, preview.stderr
+    preview_data = json.loads(preview.stdout)
+    assert preview_data["status"] == "preview"
+    assert preview_data["policy"] == {"keepLast": 1}
+    assert preview_data["selectedCount"] == 2
+    assert preview_data["deletedCount"] == 0
+    assert preview_data["retainedCount"] == 3
+    assert len(list(archive_dir.glob("alpha.*.json"))) == 3
+
+    pruned = run_cli(repo, "prune", "alpha", "--keep-last", "1")
+
+    assert pruned.returncode == 0, pruned.stderr
+    pruned_data = json.loads(pruned.stdout)
+    assert pruned_data["status"] == "pruned"
+    assert pruned_data["selectedCount"] == 2
+    assert pruned_data["deletedCount"] == 2
+    assert pruned_data["retainedCount"] == 1
+    assert list(archive_dir.glob("alpha.*.json")) == [newest_alpha_archive]
+    assert list(archive_dir.glob("beta.*.json")) == beta_archives
+    assert (repo / ".runbooks" / "alpha.json").read_bytes() == current_ledger
+
+
+def test_prune_older_than_days_uses_archive_timestamp(repo: Path):
+    runbook = repo / "aging.md"
+    runbook.write_text("# Aging\n", encoding="utf-8")
+    assert run_cli(repo, "register", "aging", "aging.md").returncode == 0
+    archive_dir = repo / ".runbooks" / "archive"
+    archive_dir.mkdir(parents=True)
+    old_timestamp = (real_datetime.now(UTC) - timedelta(days=30)).strftime(
+        "%Y%m%dT%H%M%S.%fZ"
+    )
+    recent_timestamp = real_datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    old_archive = archive_dir / f"aging.{old_timestamp}.{'a' * 32}.json"
+    recent_archive = archive_dir / f"aging.{recent_timestamp}.{'b' * 32}.json"
+    unrelated = archive_dir / f"other.{old_timestamp}.{'c' * 32}.json"
+    for archive in (old_archive, recent_archive, unrelated):
+        archive.write_text("{}\n", encoding="utf-8")
+
+    result = run_cli(repo, "prune", "aging", "--older-than-days", "7")
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["policy"] == {"olderThanDays": 7}
+    assert data["archiveCountBefore"] == 2
+    assert data["selectedCount"] == 1
+    assert data["deletedCount"] == 1
+    assert not old_archive.exists()
+    assert recent_archive.is_file()
+    assert unrelated.is_file()
+
+
+def test_prune_includes_archives_from_the_current_path_identity(repo: Path):
+    runbook = repo / "migrating.md"
+    runbook.write_text("# Migrating\n", encoding="utf-8")
+    started = run_cli(repo, "run", "migrating.md")
+    assert started.returncode == 0, started.stderr
+    path_runbook_id = json.loads(started.stdout)["runbookId"]
+    assert run_cli(repo, "run", "migrating.md", "--restart").returncode == 0
+    path_archive = next(
+        (repo / ".runbooks" / "archive").glob(f"{path_runbook_id}.*.json")
+    )
+    assert run_cli(repo, "register", "migrating", "migrating.md").returncode == 0
+
+    result = run_cli(repo, "prune", "migrating", "--keep-last", "0")
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["selectedCount"] == 1
+    assert data["deletedCount"] == 1
+    assert not path_archive.exists()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_error"),
+    [
+        (("--keep-last", "-1"), "--keep-last must be zero or greater"),
+        (("--older-than-days", "0"), "--older-than-days must be one or greater"),
+    ],
+)
+def test_prune_rejects_invalid_policy_values(
+    repo: Path,
+    arguments: tuple[str, str],
+    expected_error: str,
+):
+    runbook = repo / "cleanup.md"
+    runbook.write_text("# Cleanup\n", encoding="utf-8")
+    assert run_cli(repo, "register", "cleanup", "cleanup.md").returncode == 0
+
+    result = run_cli(repo, "prune", "cleanup", *arguments)
+
+    assert result.returncode == 2
+    assert expected_error in result.stderr
+
+
+def test_prune_rejects_matching_non_file_archive_entry(repo: Path):
+    runbook = repo / "cleanup.md"
+    runbook.write_text("# Cleanup\n", encoding="utf-8")
+    assert run_cli(repo, "register", "cleanup", "cleanup.md").returncode == 0
+    archive_entry = (
+        repo
+        / ".runbooks"
+        / "archive"
+        / f"cleanup.20260101T000000.000000Z.{'a' * 32}.json"
+    )
+    archive_entry.mkdir(parents=True)
+
+    result = run_cli(repo, "prune", "cleanup", "--keep-last", "0")
+
+    assert result.returncode == 2
+    assert "Session archive is not a regular file" in result.stderr
+    assert archive_entry.is_dir()
 
 
 def test_restart_rejects_changed_unfinished_revision(repo: Path):
@@ -871,7 +1101,17 @@ def test_duplicate_step_rejection(repo: Path):
     run_cli(repo, "register", "duplicate-check", "docs/duplicate-check.md")
     run_cli(repo, "run", "duplicate-check")
     run_cli(repo, "step", "duplicate-check", "step-1", "--title", "Step 1")
-    run_cli(repo, "complete", "duplicate-check", "--evidence", "Done")
+    run_cli(
+        repo,
+        "complete",
+        "duplicate-check",
+        "--evidence",
+        "Done",
+        "--result",
+        "pass",
+        "--score",
+        "1/1",
+    )
 
     # Attempt to set the same step again
     res = run_cli(
@@ -884,6 +1124,514 @@ def test_duplicate_step_rejection(repo: Path):
     )
     assert res.returncode == 2
     assert "already exists in session history" in res.stderr
+
+
+def test_arbitrary_order_step_can_retry_without_losing_previous_attempt(repo: Path):
+    runbook_md = repo / "arbitrary-order.md"
+    runbook_md.write_text(
+        "---\nstepOrder: arbitrary\n---\n\n# Arbitrary Order\n",
+        encoding="utf-8",
+    )
+    assert (
+        run_cli(repo, "register", "arbitrary-order", "arbitrary-order.md").returncode == 0
+    )
+    assert run_cli(repo, "run", "arbitrary-order").returncode == 0
+
+    assert (
+        run_cli(
+            repo,
+            "step",
+            "arbitrary-order",
+            "gate-1",
+            "--title",
+            "Gate 1",
+        ).returncode
+        == 0
+    )
+    first = run_cli(
+        repo,
+        "complete",
+        "arbitrary-order",
+        "--evidence",
+        "First assessment was deficient",
+        "--result",
+        "fail",
+        "--score",
+        "0/1",
+    )
+    assert first.returncode == 0
+    assert json.loads(first.stdout)["history"][0]["attempt"] == 1
+
+    retry = run_cli(
+        repo,
+        "step",
+        "arbitrary-order",
+        "gate-1",
+        "--title",
+        "Gate 1",
+        "--retry",
+    )
+    assert retry.returncode == 0
+    assert json.loads(retry.stdout)["currentStep"]["attempt"] == 2
+
+    second = run_cli(
+        repo,
+        "complete",
+        "arbitrary-order",
+        "--evidence",
+        "Second assessment passed",
+        "--result",
+        "pass",
+        "--score",
+        "1/1",
+    )
+    assert second.returncode == 0
+    history = json.loads(second.stdout)["history"]
+    assert [item["attempt"] for item in history] == [1, 2]
+    assert history[0]["evidence"] == "First assessment was deficient"
+    assert history[1]["evidence"] == "Second assessment passed"
+
+
+def test_retry_requires_a_previous_attempt(repo: Path):
+    runbook_md = repo / "retry.md"
+    runbook_md.write_text("# Retry\n", encoding="utf-8")
+    assert run_cli(repo, "register", "retry", "retry.md").returncode == 0
+    assert run_cli(repo, "run", "retry").returncode == 0
+
+    result = run_cli(
+        repo,
+        "step",
+        "retry",
+        "gate-1",
+        "--title",
+        "Gate 1",
+        "--retry",
+    )
+
+    assert result.returncode == 2
+    assert "no completed attempt" in result.stderr
+
+
+def test_retry_flag_does_not_turn_an_active_first_attempt_into_a_retry(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text("# Review\n", encoding="utf-8")
+    assert run_cli(repo, "run", "review.md").returncode == 0
+    assert run_cli(repo, "step", "review.md", "gate-1", "--title", "Gate 1").returncode == 0
+
+    retry = run_cli(
+        repo,
+        "step",
+        "review.md",
+        "gate-1",
+        "--title",
+        "Gate 1",
+        "--retry",
+    )
+
+    assert retry.returncode == 2
+    assert "no completed attempt" in retry.stderr
+    status = json.loads(run_cli(repo, "status", "review.md").stdout)
+    assert status["currentStep"]["attempt"] == 1
+
+
+def test_flexible_threshold_completes_as_accepted(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\nacceptancePolicy: flexible\nacceptanceThreshold: 60%\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+    assert run_cli(repo, "run", "review.md").returncode == 0
+    for step_id, result, score in [("gate-1", "fail", "1/2"), ("gate-2", "fail", "2/3")]:
+        assert (
+            run_cli(repo, "step", "review.md", step_id, "--title", step_id.title()).returncode
+            == 0
+        )
+        assert (
+            run_cli(
+                repo,
+                "complete",
+                "review.md",
+                "--evidence",
+                f"Assessed {step_id}",
+                "--result",
+                result,
+                "--score",
+                score,
+            ).returncode
+            == 0
+        )
+
+    finished = run_cli(
+        repo,
+        "finish",
+        "review.md",
+        "--evidence",
+        "Assessment complete",
+        "--expected-step",
+        "gate-1",
+        "--expected-step",
+        "gate-2",
+    )
+
+    assert finished.returncode == 0
+    data = json.loads(finished.stdout)
+    assert data["status"] == "completed"
+    assert data["result"] == "ACCEPTED"
+    assert data["score"]["display"] == "3/5 (60%)"
+
+
+@pytest.mark.parametrize(
+    ("result", "score", "expected_error"),
+    [
+        ("pass", "1/2", "passing step must earn every available point"),
+        ("fail", "2/2", "failed step cannot earn every available point"),
+    ],
+)
+def test_step_result_and_score_must_be_semantically_consistent(
+    repo: Path,
+    result: str,
+    score: str,
+    expected_error: str,
+):
+    runbook = repo / "review.md"
+    runbook.write_text("# Review\n", encoding="utf-8")
+    assert run_cli(repo, "run", "review.md").returncode == 0
+    assert run_cli(repo, "step", "review.md", "gate-1", "--title", "Gate 1").returncode == 0
+
+    completed = run_cli(
+        repo,
+        "complete",
+        "review.md",
+        "--evidence",
+        "Inconsistent assessment",
+        "--result",
+        result,
+        "--score",
+        score,
+    )
+
+    assert completed.returncode == 2
+    assert expected_error in completed.stderr
+
+
+def test_flexible_below_threshold_stays_partial_until_operator_decides(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\nacceptancePolicy: flexible\nacceptanceThreshold: 80%\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+    assert run_cli(repo, "run", "review.md").returncode == 0
+    assert run_cli(repo, "step", "review.md", "gate-1", "--title", "Gate 1").returncode == 0
+    assert (
+        run_cli(
+            repo,
+            "complete",
+            "review.md",
+            "--evidence",
+            "One criterion failed",
+            "--result",
+            "fail",
+            "--score",
+            "1/2",
+        ).returncode
+        == 0
+    )
+
+    partial = run_cli(
+        repo,
+        "finish",
+        "review.md",
+        "--evidence",
+        "Assessment complete",
+        "--expected-step",
+        "gate-1",
+    )
+
+    assert partial.returncode == 3
+    partial_data = json.loads(partial.stdout)
+    assert partial_data["status"] == "active"
+    assert partial_data["result"] == "PARTIAL"
+    assert partial_data["score"]["display"] == "1/2 (50%)"
+    assert partial_data["operatorDecisionRequired"] is True
+
+    accepted = run_cli(
+        repo,
+        "finish",
+        "review.md",
+        "--evidence",
+        "Operator accepted the limitations",
+        "--expected-step",
+        "gate-1",
+        "--decision",
+        "accept",
+    )
+    assert accepted.returncode == 0
+    accepted_data = json.loads(accepted.stdout)
+    assert accepted_data["status"] == "completed"
+    assert accepted_data["result"] == "ACCEPTED"
+
+
+def test_half_percentage_is_rounded_up_before_threshold_comparison(repo: Path):
+    runbook = repo / "rounding.md"
+    runbook.write_text(
+        "---\nacceptancePolicy: flexible\nacceptanceThreshold: 13%\n---\n\n# Rounding\n",
+        encoding="utf-8",
+    )
+    assert run_cli(repo, "run", "rounding.md").returncode == 0
+    assert run_cli(repo, "step", "rounding.md", "gate-1", "--title", "Gate 1").returncode == 0
+    completed = run_cli(
+        repo,
+        "complete",
+        "rounding.md",
+        "--evidence",
+        "One of eight points",
+        "--result",
+        "fail",
+        "--score",
+        "1/8",
+    )
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["history"][0]["score"]["percent"] == 13
+
+    finished = run_cli(
+        repo,
+        "finish",
+        "rounding.md",
+        "--evidence",
+        "Rounded half up",
+        "--expected-step",
+        "gate-1",
+    )
+    assert finished.returncode == 0
+    assert json.loads(finished.stdout)["result"] == "ACCEPTED"
+
+
+def test_finish_requires_every_expected_and_assessed_step(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text("# Review\n", encoding="utf-8")
+    assert run_cli(repo, "run", "review.md").returncode == 0
+    assert run_cli(repo, "step", "review.md", "gate-1", "--title", "Gate 1").returncode == 0
+    assert (
+        run_cli(
+            repo,
+            "complete",
+            "review.md",
+            "--evidence",
+            "Assessed",
+            "--result",
+            "pass",
+            "--score",
+            "1/1",
+        ).returncode
+        == 0
+    )
+
+    missing = run_cli(
+        repo,
+        "finish",
+        "review.md",
+        "--evidence",
+        "Incomplete",
+        "--expected-step",
+        "gate-1",
+        "--expected-step",
+        "gate-2",
+    )
+    omitted = run_cli(
+        repo,
+        "finish",
+        "review.md",
+        "--evidence",
+        "Incomplete",
+        "--expected-step",
+        "other-gate",
+    )
+
+    assert missing.returncode == 2
+    assert "missing: gate-2" in missing.stderr
+    assert omitted.returncode == 2
+    assert "missing: other-gate" in omitted.stderr
+
+
+def test_always_policy_accepts_only_after_every_expected_step_is_evaluated(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\nacceptancePolicy: always\nstepOrder: arbitrary\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+    assert run_cli(repo, "run", "review.md").returncode == 0
+    assert run_cli(repo, "step", "review.md", "gate-1", "--title", "Gate 1").returncode == 0
+    assert (
+        run_cli(
+            repo,
+            "skip",
+            "review.md",
+            "--reason",
+            "Unavailable evidence",
+            "--score",
+            "0/2",
+        ).returncode
+        == 0
+    )
+
+    incomplete = run_cli(
+        repo,
+        "finish",
+        "review.md",
+        "--evidence",
+        "Not all gates evaluated",
+        "--expected-step",
+        "gate-1",
+        "--expected-step",
+        "gate-2",
+    )
+    assert incomplete.returncode == 2
+    assert "missing: gate-2" in incomplete.stderr
+
+    assert run_cli(repo, "step", "review.md", "gate-2", "--title", "Gate 2").returncode == 0
+    assert (
+        run_cli(
+            repo,
+            "complete",
+            "review.md",
+            "--evidence",
+            "Evaluated",
+            "--result",
+            "fail",
+            "--score",
+            "0/1",
+        ).returncode
+        == 0
+    )
+    accepted = run_cli(
+        repo,
+        "finish",
+        "review.md",
+        "--evidence",
+        "All gates evaluated",
+        "--expected-step",
+        "gate-1",
+        "--expected-step",
+        "gate-2",
+    )
+    assert accepted.returncode == 0
+    data = json.loads(accepted.stdout)
+    assert data["status"] == "completed"
+    assert data["result"] == "ACCEPTED"
+    assert data["score"]["display"] == "0/3 (0%)"
+
+
+def test_strict_arbitrary_can_continue_but_finishes_rejected(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\nacceptancePolicy: strict\nstepOrder: arbitrary\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+    assert run_cli(repo, "run", "review.md").returncode == 0
+    for step_id, result in [("gate-1", "fail"), ("gate-2", "pass")]:
+        assert (
+            run_cli(repo, "step", "review.md", step_id, "--title", step_id.title()).returncode
+            == 0
+        )
+        assert (
+            run_cli(
+                repo,
+                "complete",
+                "review.md",
+                "--evidence",
+                f"Assessed {step_id}",
+                "--result",
+                result,
+            ).returncode
+            == 0
+        )
+
+    finished = run_cli(
+        repo,
+        "finish",
+        "review.md",
+        "--evidence",
+        "All gates assessed",
+        "--expected-step",
+        "gate-1",
+        "--expected-step",
+        "gate-2",
+    )
+    assert finished.returncode == 0
+    data = json.loads(finished.stdout)
+    assert data["status"] == "completed"
+    assert data["result"] == "REJECTED"
+
+
+def test_strict_sequential_requires_retry_before_advancing(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\nacceptancePolicy: strict\nstepOrder: sequential\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+    assert run_cli(repo, "run", "review.md").returncode == 0
+    assert run_cli(repo, "step", "review.md", "gate-1", "--title", "Gate 1").returncode == 0
+    assert (
+        run_cli(
+            repo,
+            "complete",
+            "review.md",
+            "--evidence",
+            "Failed",
+            "--result",
+            "fail",
+        ).returncode
+        == 0
+    )
+    advance = run_cli(repo, "step", "review.md", "gate-2", "--title", "Gate 2")
+    assert advance.returncode == 2
+    assert "retry first: gate-1" in advance.stderr
+
+    assert (
+        run_cli(
+            repo,
+            "step",
+            "review.md",
+            "gate-1",
+            "--title",
+            "Gate 1",
+            "--retry",
+        ).returncode
+        == 0
+    )
+    assert (
+        run_cli(
+            repo,
+            "complete",
+            "review.md",
+            "--evidence",
+            "Passed on retry",
+            "--result",
+            "pass",
+        ).returncode
+        == 0
+    )
+    assert run_cli(repo, "step", "review.md", "gate-2", "--title", "Gate 2").returncode == 0
+
+
+def test_legacy_active_session_remains_compatible(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text("# Review\n", encoding="utf-8")
+    started = json.loads(run_cli(repo, "run", "review.md").stdout)
+    assert run_cli(repo, "step", "review.md", "gate-1", "--title", "Gate 1").returncode == 0
+    state_path = Path(started["statePath"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.pop("assessmentVersion")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    completed = run_cli(repo, "complete", "review.md", "--evidence", "Legacy evidence")
+    finished = run_cli(repo, "finish", "review.md", "--evidence", "Legacy finish")
+
+    assert completed.returncode == 0
+    assert finished.returncode == 0
+    data = json.loads(finished.stdout)
+    assert data["status"] == "completed"
+    assert "result" not in data
 
 
 def test_finish_with_unresolved_step_rejection(repo: Path):
@@ -942,7 +1690,17 @@ def test_register_migrates_existing_path_session(repo: Path):
     started = json.loads(run_cli(repo, "run", "release.md").stdout)
     assert run_cli(repo, "step", "release.md", "prepare", "--title", "Prepare").returncode == 0
     assert (
-        run_cli(repo, "complete", "release.md", "--evidence", "Preparation verified").returncode
+        run_cli(
+            repo,
+            "complete",
+            "release.md",
+            "--evidence",
+            "Preparation verified",
+            "--result",
+            "pass",
+            "--score",
+            "1/1",
+        ).returncode
         == 0
     )
 
@@ -1016,6 +1774,292 @@ def test_minimal_root_registry_resolves_arbitrary_id(repo: Path):
     assert data["registered"] is True
     assert data["effortLevel"] == "medium"
     assert data["modelTier"] == "medium"
+    assert data["acceptancePolicy"] == "flexible"
+    assert data["stepOrder"] == "sequential"
+    assert data["acceptanceThreshold"] is None
+
+
+def test_runbook_frontmatter_controls_identity_description_and_execution(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\n"
+        "id: release-review\n"
+        "description: Review the release evidence.\n"
+        "acceptancePolicy: flexible\n"
+        "stepOrder: arbitrary\n"
+        "acceptanceThreshold: 80%\n"
+        "---\n\n"
+        "# Review\n",
+        encoding="utf-8",
+    )
+
+    resolved = run_cli(repo, "resolve", "review.md")
+
+    assert resolved.returncode == 0
+    data = json.loads(resolved.stdout)
+    assert data["id"] == "release-review"
+    assert data["description"] == "Review the release evidence."
+    assert data["acceptancePolicy"] == "flexible"
+    assert data["stepOrder"] == "arbitrary"
+    assert data["acceptanceThreshold"] == "80%"
+
+
+@pytest.mark.parametrize(
+    ("property_lines", "expected_error"),
+    [
+        ("acceptancePolicy: optional", "acceptancePolicy"),
+        ("stepOrder: random", "stepOrder"),
+        ("acceptanceThreshold: 101%", "acceptanceThreshold"),
+        (
+            "acceptancePolicy: strict\nacceptanceThreshold: 100%",
+            "requires acceptancePolicy: flexible",
+        ),
+        (
+            "acceptancePolicy: always\nacceptanceThreshold: 100%",
+            "requires acceptancePolicy: flexible",
+        ),
+        ("acceptancePolicy: strict\nacceptancePolicy: flexible", "Duplicate"),
+        ("id: Invalid ID", "Invalid runbook id"),
+        ("description:", "description must not be empty"),
+    ],
+)
+def test_invalid_runbook_frontmatter_is_rejected(
+    repo: Path,
+    property_lines: str,
+    expected_error: str,
+):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        f"---\n{property_lines}\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(repo, "resolve", "review.md")
+
+    assert result.returncode == 2
+    assert expected_error in result.stderr
+
+
+def test_registration_rejects_frontmatter_id_mismatch(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\nid: documented-review\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(repo, "register", "other-review", "review.md")
+
+    assert result.returncode == 2
+    assert "does not match registration id" in result.stderr
+
+
+def test_registration_uses_frontmatter_description(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\n"
+        "id: documented-review\n"
+        "description: Review directly from the document.\n"
+        "---\n\n"
+        "# Review\n",
+        encoding="utf-8",
+    )
+
+    result = run_cli(repo, "register", "documented-review", "review.md")
+
+    assert result.returncode == 0
+    assert (
+        json.loads(result.stdout)["registered"]["description"]
+        == "Review directly from the document."
+    )
+    registry = json.loads((repo / "runbooks.json").read_text(encoding="utf-8"))
+    assert "description" not in registry["runbooks"][0]
+
+    runbook.write_text(
+        "---\n"
+        "id: documented-review\n"
+        "description: Updated directly in the document.\n"
+        "---\n\n"
+        "# Review\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        json.loads(run_cli(repo, "list").stdout)["runbooks"][0]["description"]
+        == "Updated directly in the document."
+    )
+    assert (
+        json.loads(run_cli(repo, "resolve", "documented-review").stdout)["description"]
+        == "Updated directly in the document."
+    )
+
+
+def test_explicit_registry_description_overrides_document_description(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\ndescription: Document description.\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+
+    registered = run_cli(
+        repo,
+        "register",
+        "review",
+        "review.md",
+        "--description",
+        "Registry override.",
+    )
+    runbook.write_text(
+        "---\ndescription: Changed document description.\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+
+    assert registered.returncode == 0
+    assert (
+        json.loads(run_cli(repo, "list").stdout)["runbooks"][0]["description"]
+        == "Registry override."
+    )
+    assert (
+        json.loads(run_cli(repo, "resolve", "review").stdout)["description"]
+        == "Registry override."
+    )
+
+
+def test_existing_registry_description_is_treated_as_an_override(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\ndescription: Document description.\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+    (repo / "runbooks.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "runbooks": [
+                    {
+                        "id": "review",
+                        "path": "review.md",
+                        "description": "Existing registry description.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = run_cli(repo, "resolve", "review")
+
+    assert resolved.returncode == 0
+    assert json.loads(resolved.stdout)["description"] == "Existing registry description."
+
+
+def test_minimal_frontmatter_supports_quoted_colons_and_rejects_non_flat_data(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\ndescription: 'Review: release evidence'\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+
+    resolved = run_cli(repo, "resolve", "review.md")
+
+    assert resolved.returncode == 0
+    assert json.loads(resolved.stdout)["description"] == "Review: release evidence"
+
+    runbook.write_text("---\n- not\n- a mapping\n---\n\n# Review\n", encoding="utf-8")
+    rejected = run_cli(repo, "resolve", "review.md")
+    assert rejected.returncode == 2
+    assert "flat key: value properties" in rejected.stderr
+
+
+def test_minimal_frontmatter_supports_literal_multiline_description(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\n"
+        "id: review\n"
+        "description: |\n"
+        "  Review the release evidence.\n"
+        "  Preserve every stated limitation.\n"
+        "acceptancePolicy: flexible\n"
+        "---\n\n"
+        "# Review\n",
+        encoding="utf-8",
+    )
+
+    resolved = run_cli(repo, "resolve", "review.md")
+
+    assert resolved.returncode == 0
+    assert (
+        json.loads(resolved.stdout)["description"]
+        == "Review the release evidence.\nPreserve every stated limitation."
+    )
+
+
+def test_minimal_frontmatter_rejects_multiline_values_for_other_properties(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text(
+        "---\nacceptancePolicy: |\n  flexible\n---\n\n# Review\n",
+        encoding="utf-8",
+    )
+
+    rejected = run_cli(repo, "resolve", "review.md")
+
+    assert rejected.returncode == 2
+    assert "Only runbook frontmatter description" in rejected.stderr
+
+
+def test_document_id_adopts_existing_path_session_without_losing_progress(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text("# Review\n", encoding="utf-8")
+    started = json.loads(run_cli(repo, "run", "review.md").stdout)
+    legacy_path = Path(started["statePath"])
+    assert run_cli(repo, "step", "review.md", "gate-1", "--title", "Gate 1").returncode == 0
+    assert (
+        run_cli(
+            repo,
+            "complete",
+            "review.md",
+            "--evidence",
+            "Assessed",
+            "--result",
+            "pass",
+            "--score",
+            "1/1",
+        ).returncode
+        == 0
+    )
+    runbook.write_text("---\nid: review\n---\n\n# Review\n", encoding="utf-8")
+
+    decision = run_cli(repo, "run", "review.md")
+
+    assert decision.returncode == 3
+    assert json.loads(decision.stdout)["reason"] == "unfinished_runbook_changed"
+    adopted_path = repo / ".runbooks" / "review.json"
+    assert adopted_path.is_file()
+    assert not legacy_path.exists()
+    adopted = json.loads(adopted_path.read_text(encoding="utf-8"))
+    assert adopted["runbookId"] == "review"
+    assert adopted["history"][0]["id"] == "gate-1"
+
+    continued = run_cli(repo, "run", "review.md", "--continue")
+    assert continued.returncode == 0
+    assert json.loads(continued.stdout)["history"][0]["evidence"] == "Assessed"
+
+
+def test_document_id_migration_recovers_an_interrupted_atomic_rename(repo: Path):
+    runbook = repo / "review.md"
+    runbook.write_text("# Review\n", encoding="utf-8")
+    started = json.loads(run_cli(repo, "run", "review.md").stdout)
+    legacy_path = Path(started["statePath"])
+    target_path = repo / ".runbooks" / "review.json"
+    runbook.write_text("---\nid: review\n---\n\n# Review\n", encoding="utf-8")
+    legacy_path.replace(target_path)
+
+    recovered = run_cli(repo, "run", "review.md")
+
+    assert recovered.returncode == 3
+    assert json.loads(recovered.stdout)["reason"] == "unfinished_runbook_changed"
+    recovered_state = json.loads(target_path.read_text(encoding="utf-8"))
+    assert recovered_state["runbookId"] == "review"
+    assert not legacy_path.exists()
 
 
 def test_registry_normalizes_windows_separators_for_portability(repo: Path):
@@ -1218,6 +2262,7 @@ def test_root_registry_reports_invalid_utf8_without_traceback(repo: Path):
 
 
 def test_root_registry_reports_unpaired_surrogate_without_traceback(repo: Path):
+    (repo / "release.md").write_text("# Release\n", encoding="utf-8")
     (repo / "runbooks.json").write_text(
         json.dumps(
             {
@@ -1289,7 +2334,20 @@ def test_session_commands_reject_blank_required_values(repo: Path):
         assert result.returncode == 2
         assert expected_error in result.stderr
 
-    assert run_cli(repo, "complete", "review", "--evidence", "Verified").returncode == 0
+    assert (
+        run_cli(
+            repo,
+            "complete",
+            "review",
+            "--evidence",
+            "Verified",
+            "--result",
+            "pass",
+            "--score",
+            "1/1",
+        ).returncode
+        == 0
+    )
     blank_finish = run_cli(repo, "finish", "review", "--evidence", "   ")
     assert blank_finish.returncode == 2
     assert "Completion evidence must not be empty" in blank_finish.stderr

@@ -18,15 +18,18 @@ from .state import (
     command_block,
     command_complete,
     command_finish,
+    command_prune,
     command_skip,
     command_start,
     command_step,
     load_state,
+    migrate_path_identity_session,
 )
 from .storage import (
     configure_standard_streams,
     find_repo_root,
     interprocess_lock,
+    path_runbook_id,
     print_json,
     repository_registry_path,
     session_locks,
@@ -74,14 +77,27 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Show a runbook session")
     status_parser.add_argument("selector")
 
+    prune_parser = subparsers.add_parser(
+        "prune",
+        help="Explicitly remove archived sessions for one runbook",
+    )
+    prune_parser.add_argument("selector")
+    prune_policy = prune_parser.add_mutually_exclusive_group(required=True)
+    prune_policy.add_argument("--keep-last", type=int)
+    prune_policy.add_argument("--older-than-days", type=int)
+    prune_parser.add_argument("--dry-run", action="store_true")
+
     step_parser = subparsers.add_parser("step", help="Set the unresolved step")
     step_parser.add_argument("selector")
     step_parser.add_argument("step_id")
     step_parser.add_argument("--title", required=True)
+    step_parser.add_argument("--retry", action="store_true")
 
     complete_parser = subparsers.add_parser("complete", help="Complete the current step")
     complete_parser.add_argument("selector")
     complete_parser.add_argument("--evidence", required=True)
+    complete_parser.add_argument("--result", choices=["pass", "fail"])
+    complete_parser.add_argument("--score")
 
     block_parser = subparsers.add_parser("block", help="Record a blocker on the current step")
     block_parser.add_argument("selector")
@@ -90,10 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
     skip_parser = subparsers.add_parser("skip", help="Skip the current step with a reason")
     skip_parser.add_argument("selector")
     skip_parser.add_argument("--reason", required=True)
+    skip_parser.add_argument("--score")
 
     finish_parser = subparsers.add_parser("finish", help="Finish the runbook session")
     finish_parser.add_argument("selector")
     finish_parser.add_argument("--evidence", required=True)
+    finish_parser.add_argument("--expected-step", action="append")
+    finish_parser.add_argument("--decision", choices=["accept", "reject"])
     return parser
 
 
@@ -113,7 +132,7 @@ def main() -> int:
             registry_enabled = registry_path.is_file()
             registry = load_registry(registry_path, repo_root)
             if args.command == "list":
-                command_list(registry)
+                command_list(registry, repo_root)
                 return 0
             if args.command == "register":
                 command_register(
@@ -142,7 +161,13 @@ def main() -> int:
                 print_json(runbook)
                 return 0
 
-            with session_locks(repo_root, [runbook["id"]]) as state_paths:
+            legacy_path_id = path_runbook_id(runbook["relativePath"])
+            session_ids = [runbook["id"]]
+            if not runbook["registered"] and legacy_path_id != runbook["id"]:
+                session_ids.append(legacy_path_id)
+            with session_locks(repo_root, session_ids) as state_paths:
+                if legacy_path_id in state_paths:
+                    migrate_path_identity_session(runbook, legacy_path_id, state_paths)
                 path = state_paths[runbook["id"]]
                 if args.command == "run":
                     command_start(
@@ -159,16 +184,42 @@ def main() -> int:
                             load_state(path, runbook, allow_completed_outdated=True),
                         )
                     )
+                elif args.command == "prune":
+                    command_prune(
+                        runbook,
+                        repo_root,
+                        args.keep_last,
+                        args.older_than_days,
+                        args.dry_run,
+                    )
                 elif args.command == "step":
-                    command_step(runbook, repo_root, args.step_id, args.title)
+                    command_step(
+                        runbook,
+                        repo_root,
+                        args.step_id,
+                        args.title,
+                        args.retry,
+                    )
                 elif args.command == "complete":
-                    command_complete(runbook, repo_root, args.evidence)
+                    command_complete(
+                        runbook,
+                        repo_root,
+                        args.evidence,
+                        args.result,
+                        args.score,
+                    )
                 elif args.command == "block":
                     command_block(runbook, repo_root, args.reason)
                 elif args.command == "skip":
-                    command_skip(runbook, repo_root, args.reason)
+                    command_skip(runbook, repo_root, args.reason, args.score)
                 elif args.command == "finish":
-                    command_finish(runbook, repo_root, args.evidence)
+                    command_finish(
+                        runbook,
+                        repo_root,
+                        args.evidence,
+                        args.expected_step,
+                        args.decision,
+                    )
                 else:
                     raise RunbookError(f"Unsupported command: {args.command}")
         return 0
