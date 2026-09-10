@@ -6,6 +6,8 @@ import re
 from typing import Any
 
 DEFAULT_REGISTRY_FILENAME = "runbooks.json"
+REGISTRY_SCHEMA_VERSION = 2
+SESSION_SCHEMA_VERSION = 2
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 GENERATED_PATH_ID_PATTERN = re.compile(r"^path-[0-9a-f]{12}$")
 LEGACY_HASH_FILENAME_ID_PATTERN = re.compile(r"^id-[0-9a-f]{64}$")
@@ -32,8 +34,6 @@ REGISTRY_FIELDS = {
     "title",
     "path",
     "description",
-    "effortLevel",
-    "modelTier",
 }
 
 

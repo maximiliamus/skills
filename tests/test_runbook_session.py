@@ -63,6 +63,10 @@ def repo(tmp_path: Path) -> Path:
 def cli_command(repo: Path, *args: str) -> list[str]:
     cmd = [sys.executable, str(RUNBOOK_SCRIPT), "--repo-root", str(repo)]
     cmd.extend(args)
+    if args and args[0] in {"run", "step", "complete", "block", "skip", "finish"}:
+        cmd.extend(["--model-id", "test-model"])
+    if args and args[0] == "run":
+        cmd.extend(["--model-family", "predecessor"])
     return cmd
 
 
@@ -97,7 +101,7 @@ def test_empty_registry_list(repo: Path):
     result = run_cli(repo, "list")
     assert result.returncode == 0
     data = json.loads(result.stdout)
-    assert data["schemaVersion"] == 1
+    assert data["schemaVersion"] == 2
     assert data["runbooks"] == []
     assert not (repo / ".runbooks").exists()
 
@@ -105,7 +109,7 @@ def test_empty_registry_list(repo: Path):
 def test_list_with_registry_uses_registry_lock(repo: Path, monkeypatch: pytest.MonkeyPatch):
     registry_path = repo / "runbooks.json"
     registry_path.write_text(
-        json.dumps({"schemaVersion": 1, "runbooks": []}),
+        json.dumps({"schemaVersion": 2, "runbooks": []}),
         encoding="utf-8",
     )
     module = load_runbook_module()
@@ -309,7 +313,7 @@ def test_cli_emits_utf8_diagnostics_for_localized_os_errors(repo: Path):
     runbook.write_text("# Release\n", encoding="utf-8")
     registry_path = repo / "runbooks.json"
     registry_path.write_text(
-        json.dumps({"schemaVersion": 1, "runbooks": []}),
+        json.dumps({"schemaVersion": 2, "runbooks": []}),
         encoding="utf-8",
     )
 
@@ -372,21 +376,20 @@ def test_status_marks_completed_older_revision_as_outdated(repo: Path):
     assert "operator_decision_required" not in step.stdout
 
 
-def test_register_with_custom_profiles(repo: Path):
+def test_register_reads_profiles_from_document(repo: Path):
     docs_dir = repo / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
     runbook_md = docs_dir / "complex-migration.md"
-    runbook_md.write_text("# Complex Migration\n\nInstructions\n", encoding="utf-8")
+    runbook_md.write_text(
+        "---\neffortLevel: high\nmodelTier: heavy\n---\n# Complex Migration\n\nInstructions\n",
+        encoding="utf-8",
+    )
 
     res = run_cli(
         repo,
         "register",
         "production-migration",
         "docs/complex-migration.md",
-        "--effort-level",
-        "high",
-        "--model-tier",
-        "heavy",
     )
     assert res.returncode == 0
     data = json.loads(res.stdout)
@@ -401,7 +404,9 @@ def test_register_updates_existing_entry(repo: Path):
     original = docs_dir / "original.md"
     replacement = docs_dir / "replacement.md"
     original.write_text("# Original\n", encoding="utf-8")
-    replacement.write_text("# Replacement\n", encoding="utf-8")
+    replacement.write_text(
+        "---\neffortLevel: high\nmodelTier: heavy\n---\n# Replacement\n", encoding="utf-8"
+    )
 
     assert run_cli(repo, "register", "release", "docs/original.md").returncode == 0
     result = run_cli(
@@ -411,10 +416,6 @@ def test_register_updates_existing_entry(repo: Path):
         "docs/replacement.md",
         "--title",
         "Updated Release",
-        "--effort-level",
-        "high",
-        "--model-tier",
-        "heavy",
     )
 
     assert result.returncode == 0
@@ -433,7 +434,9 @@ def test_register_partial_update_preserves_unspecified_metadata(repo: Path):
     docs_dir.mkdir(parents=True, exist_ok=True)
     original = docs_dir / "original.md"
     replacement = docs_dir / "replacement.md"
-    original.write_text("# Original\n", encoding="utf-8")
+    original.write_text(
+        "---\neffortLevel: high\nmodelTier: heavy\n---\n# Original\n", encoding="utf-8"
+    )
     replacement.write_text("# Replacement\n", encoding="utf-8")
 
     assert (
@@ -446,10 +449,6 @@ def test_register_partial_update_preserves_unspecified_metadata(repo: Path):
             "Custom Release",
             "--description",
             "Custom description",
-            "--effort-level",
-            "high",
-            "--model-tier",
-            "heavy",
         ).returncode
         == 0
     )
@@ -470,8 +469,9 @@ def test_register_partial_update_preserves_unspecified_metadata(repo: Path):
         "title": "Renamed Release",
         "path": "docs/replacement.md",
         "description": "Custom description",
-        "effortLevel": "high",
-        "modelTier": "heavy",
+        "effortLevel": "medium",
+        "modelTier": "medium",
+        "modelFamily": "current",
     }
 
 
@@ -512,17 +512,16 @@ def test_register_with_extra_effort_level(repo: Path):
     docs_dir = repo / "docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
     runbook_md = docs_dir / "deep-investigation.md"
-    runbook_md.write_text("# Deep Investigation\n\nInstructions\n", encoding="utf-8")
+    runbook_md.write_text(
+        "---\neffortLevel: extra\nmodelTier: heavy\n---\n# Deep Investigation\n\nInstructions\n",
+        encoding="utf-8",
+    )
 
     res = run_cli(
         repo,
         "register",
         "deep-investigation",
         "docs/deep-investigation.md",
-        "--effort-level",
-        "extra",
-        "--model-tier",
-        "heavy",
     )
     assert res.returncode == 0
     data = json.loads(res.stdout)
@@ -581,6 +580,7 @@ def test_legacy_unsafe_session_filename_is_migrated(repo: Path):
     runbook.write_text("# Release\n", encoding="utf-8")
     assert run_cli(repo, "register", runbook_id, "release.md").returncode == 0
     resolved = json.loads(run_cli(repo, "resolve", runbook_id).stdout)
+    resolved.update(modelFamily="predecessor", modelId="test-model")
     state = module.new_state(resolved)
     legacy_path = repo / ".runbooks" / f"{runbook_id}.json"
     module.write_state(legacy_path, state)
@@ -1072,7 +1072,7 @@ def test_resolve_reports_invalid_utf8_registered_runbook_without_traceback(repo:
     (repo / "runbooks.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "runbooks": [
                     {
                         "id": "invalid",
@@ -1614,7 +1614,7 @@ def test_strict_sequential_requires_retry_before_advancing(repo: Path):
     assert run_cli(repo, "step", "review.md", "gate-2", "--title", "Gate 2").returncode == 0
 
 
-def test_legacy_active_session_remains_compatible(repo: Path):
+def test_session_without_required_assessment_version_fails_closed(repo: Path):
     runbook = repo / "review.md"
     runbook.write_text("# Review\n", encoding="utf-8")
     started = json.loads(run_cli(repo, "run", "review.md").stdout)
@@ -1627,11 +1627,10 @@ def test_legacy_active_session_remains_compatible(repo: Path):
     completed = run_cli(repo, "complete", "review.md", "--evidence", "Legacy evidence")
     finished = run_cli(repo, "finish", "review.md", "--evidence", "Legacy finish")
 
-    assert completed.returncode == 0
-    assert finished.returncode == 0
-    data = json.loads(finished.stdout)
-    assert data["status"] == "completed"
-    assert "result" not in data
+    assert completed.returncode == 2
+    assert finished.returncode == 2
+    assert "Unsupported session assessment schema" in completed.stderr
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state
 
 
 def test_finish_with_unresolved_step_rejection(repo: Path):
@@ -1752,7 +1751,7 @@ def test_minimal_root_registry_resolves_arbitrary_id(repo: Path):
     (repo / "runbooks.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "runbooks": [
                     {
                         "id": "ship-production",
@@ -1933,7 +1932,7 @@ def test_existing_registry_description_is_treated_as_an_override(repo: Path):
     (repo / "runbooks.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "runbooks": [
                     {
                         "id": "review",
@@ -2069,7 +2068,7 @@ def test_registry_normalizes_windows_separators_for_portability(repo: Path):
     (repo / "runbooks.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "runbooks": [
                     {
                         "id": "release",
@@ -2106,8 +2105,6 @@ def test_same_content_registry_path_change_refreshes_session_metadata(repo: Path
     entry = registry["runbooks"][0]
     entry["path"] = "docs/moved.md"
     entry["title"] = "Moved Runbook"
-    entry["effortLevel"] = "high"
-    entry["modelTier"] = "heavy"
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
     original.unlink()
 
@@ -2117,8 +2114,8 @@ def test_same_content_registry_path_change_refreshes_session_metadata(repo: Path
     data = json.loads(result.stdout)
     assert data["runbookPath"] == "docs/moved.md"
     assert data["runbookTitle"] == "Moved Runbook"
-    assert data["effortLevel"] == "high"
-    assert data["modelTier"] == "heavy"
+    assert data["effortLevel"] == "medium"
+    assert data["modelTier"] == "medium"
     saved = json.loads((repo / ".runbooks" / "release.json").read_text(encoding="utf-8"))
     assert saved["runbookPath"] == "docs/moved.md"
 
@@ -2128,7 +2125,7 @@ def test_root_registry_disables_path_fallback(repo: Path):
     docs_dir.mkdir(parents=True, exist_ok=True)
     (docs_dir / "quick-test.md").write_text("# Quick Test\n", encoding="utf-8")
     (repo / "runbooks.json").write_text(
-        json.dumps({"schemaVersion": 1, "runbooks": []}),
+        json.dumps({"schemaVersion": 2, "runbooks": []}),
         encoding="utf-8",
     )
 
@@ -2157,7 +2154,7 @@ def test_root_registry_requires_relative_paths(repo: Path):
     (repo / "runbooks.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "runbooks": [{"id": "absolute", "path": str(runbook_md)}],
             }
         ),
@@ -2176,7 +2173,7 @@ def test_root_registry_rejects_reserved_generated_path_id(repo: Path):
     (repo / "runbooks.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "runbooks": [{"id": "path-0123456789ab", "path": "release.md"}],
             }
         ),
@@ -2217,7 +2214,7 @@ def test_root_registry_rejects_invalid_fields(
     }
     entry.update(entry_update)
     (repo / "runbooks.json").write_text(
-        json.dumps({"schemaVersion": 1, "runbooks": [entry]}),
+        json.dumps({"schemaVersion": 2, "runbooks": [entry]}),
         encoding="utf-8",
     )
 
@@ -2241,7 +2238,7 @@ def test_root_registry_rejects_boolean_schema_version(repo: Path):
 
 def test_root_registry_rejects_float_schema_version(repo: Path):
     (repo / "runbooks.json").write_text(
-        json.dumps({"schemaVersion": 1.0, "runbooks": []}),
+        json.dumps({"schemaVersion": 2.0, "runbooks": []}),
         encoding="utf-8",
     )
 
@@ -2266,7 +2263,7 @@ def test_root_registry_reports_unpaired_surrogate_without_traceback(repo: Path):
     (repo / "runbooks.json").write_text(
         json.dumps(
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "runbooks": [
                     {
                         "id": "release",
@@ -2419,7 +2416,7 @@ def test_atomic_write_retries_transient_replace_denial(
 def test_registry_write_preserves_posix_file_mode(repo: Path):
     module = load_runbook_module()
     registry = module.repository_registry_path(repo)
-    registry.write_text('{"schemaVersion": 1, "runbooks": []}\n', encoding="utf-8")
+    registry.write_text('{"schemaVersion": 2, "runbooks": []}\n', encoding="utf-8")
     registry.chmod(0o644)
 
     module.write_registry(registry, {})
@@ -2469,6 +2466,7 @@ def test_state_validation_rejects_malformed_ledgers(
         "modelTier": "medium",
         "registered": True,
     }
+    runbook.update(modelFamily="predecessor", modelId="test-model")
     state = module.new_state(runbook)
     state[field] = invalid_value
     path = module.session_path(repo, "review")

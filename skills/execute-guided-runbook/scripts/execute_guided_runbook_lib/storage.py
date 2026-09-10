@@ -11,7 +11,7 @@ import stat
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +26,7 @@ from .model import (
     LOCK_POLL_SECONDS,
     LOCK_TIMEOUT_SECONDS,
     MAX_DIRECT_SESSION_ID_LENGTH,
+    SESSION_SCHEMA_VERSION,
     RunbookError,
 )
 
@@ -369,6 +370,9 @@ def migrate_legacy_session(canonical: Path, legacy: Path, runbook_id: str) -> No
     legacy_state = read_json(legacy)
     if legacy_state.get("runbookId") != runbook_id:
         return
+    version = legacy_state.get("schemaVersion")
+    if type(version) is not int or version != SESSION_SCHEMA_VERSION:
+        raise RunbookError(f"Unsupported session schema in {legacy}")
     if canonical.exists():
         raise RunbookError(
             f"Both legacy and current session files exist for {runbook_id}: "
@@ -386,6 +390,9 @@ def migrate_legacy_session(canonical: Path, legacy: Path, runbook_id: str) -> No
 def session_locks(
     repo_root: Path,
     runbook_ids: list[str],
+    *,
+    validate_candidate: Callable[[Path, object], None] | None = None,
+    before_migration: Callable[[Path, str], None] | None = None,
 ) -> Iterator[dict[str, Path]]:
     unique_ids = list(dict.fromkeys(runbook_ids))
     canonical_paths = {
@@ -401,6 +408,18 @@ def session_locks(
     with ExitStack() as locks:
         for lock_target in lock_targets:
             locks.enter_context(interprocess_lock(repo_root, lock_target))
+        if validate_candidate or before_migration:
+            candidates = dict.fromkeys(
+                [*canonical_paths.values(), *legacy_paths.values()]
+            )
+            for candidate in candidates:
+                if not candidate.exists():
+                    continue
+                stored_id = read_json(candidate).get("runbookId")
+                if validate_candidate:
+                    validate_candidate(candidate, stored_id)
+                if stored_id in unique_ids and before_migration:
+                    before_migration(candidate, stored_id)
         for runbook_id in unique_ids:
             migrate_legacy_session(
                 canonical_paths[runbook_id],

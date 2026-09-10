@@ -12,9 +12,9 @@ SCRIPT = (
     ROOT
     / ".agents"
     / "skills"
-    / "bump-skills-version"
+    / "bump-version"
     / "scripts"
-    / "bump_skills_version.py"
+    / "bump_version.py"
 )
 
 

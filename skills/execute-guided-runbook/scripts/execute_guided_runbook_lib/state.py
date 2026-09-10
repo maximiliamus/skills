@@ -17,11 +17,19 @@ from .model import (
     EFFORT_LEVELS,
     MODEL_TIERS,
     OPERATOR_DECISIONS,
+    SESSION_SCHEMA_VERSION,
     STEP_ORDERS,
     STEP_RESULTS,
     OperatorDecisionRequired,
     RunbookError,
     valid_acceptance_threshold,
+)
+from .model_binding import (
+    check_resume_request,
+    model_binding,
+    resolve_binding,
+    validate_binding,
+    verify_model_id,
 )
 from .storage import (
     content_hash,
@@ -51,17 +59,17 @@ def session_status(state: dict[str, Any]) -> str:
 
 
 def new_state(runbook: dict[str, Any]) -> dict[str, Any]:
+    validate_binding(runbook)
     now = utc_now()
     return {
-        "schemaVersion": 1,
+        "schemaVersion": SESSION_SCHEMA_VERSION,
         "assessmentVersion": ASSESSMENT_VERSION,
         "runbookId": runbook["id"],
         "runbookTitle": runbook["title"],
         "runbookPath": runbook["relativePath"],
         "runbookSha256": content_hash(Path(runbook["path"])),
         "registered": runbook["registered"],
-        "effortLevel": runbook["effortLevel"],
-        "modelTier": runbook["modelTier"],
+        **model_binding(runbook),
         "acceptancePolicy": runbook.get(
             "acceptancePolicy", DEFAULT_ACCEPTANCE_POLICY
         ),
@@ -81,8 +89,6 @@ def sync_state_metadata(state: dict[str, Any], runbook: dict[str, Any]) -> bool:
         "runbookTitle": runbook["title"],
         "runbookPath": runbook["relativePath"],
         "registered": runbook["registered"],
-        "effortLevel": runbook["effortLevel"],
-        "modelTier": runbook["modelTier"],
         "acceptancePolicy": runbook.get(
             "acceptancePolicy", DEFAULT_ACCEPTANCE_POLICY
         ),
@@ -124,8 +130,6 @@ def validate_history_record(
     record: Any,
     index: int,
     path: Path,
-    *,
-    structured: bool,
 ) -> None:
     if not isinstance(record, dict):
         raise RunbookError(f"Session history item {index} must be an object in {path}")
@@ -144,13 +148,12 @@ def validate_history_record(
         require_state_string(record, "skippedAt", path)
     else:
         raise RunbookError(f"Unsupported session history status at item {index}: {status}")
-    if structured:
-        step_result = record.get("stepResult")
-        if not isinstance(step_result, str) or step_result not in STEP_RESULTS:
-            raise RunbookError(
-                f"Session history stepResult is invalid at item {index} in {path}"
-            )
-        validate_score(record.get("score"), f"Session history item {index}", path)
+    step_result = record.get("stepResult")
+    if not isinstance(step_result, str) or step_result not in STEP_RESULTS:
+        raise RunbookError(
+            f"Session history stepResult is invalid at item {index} in {path}"
+        )
+    validate_score(record.get("score"), f"Session history item {index}", path)
 
 
 def validate_current_step(current: Any, path: Path) -> None:
@@ -174,12 +177,12 @@ def validate_current_step(current: Any, path: Path) -> None:
 
 def validate_state(state: dict[str, Any], runbook: dict[str, Any], path: Path) -> None:
     version = state.get("schemaVersion")
-    if type(version) is not int or version != 1:
+    if type(version) is not int or version != SESSION_SCHEMA_VERSION:
         raise RunbookError(f"Unsupported session schema in {path}")
     assessment_version = state.get("assessmentVersion")
-    if assessment_version is not None and assessment_version != ASSESSMENT_VERSION:
+    if type(assessment_version) is not int or assessment_version != ASSESSMENT_VERSION:
         raise RunbookError(f"Unsupported session assessment schema in {path}")
-    structured = assessment_version == ASSESSMENT_VERSION
+    validate_binding(state)
 
     runbook_id = require_state_string(state, "runbookId", path)
     if runbook_id != runbook["id"]:
@@ -231,7 +234,7 @@ def validate_state(state: dict[str, Any], runbook: dict[str, Any], path: Path) -
     if not isinstance(history, list):
         raise RunbookError(f"Session history must be a list in {path}")
     for index, record in enumerate(history):
-        validate_history_record(record, index, path, structured=structured)
+        validate_history_record(record, index, path)
 
     decisions = state.get("revisionDecisions")
     if not isinstance(decisions, list) or not all(isinstance(item, dict) for item in decisions):
@@ -239,22 +242,21 @@ def validate_state(state: dict[str, Any], runbook: dict[str, Any], path: Path) -
     if status == "completed":
         require_state_string(state, "completedAt", path)
         require_state_string(state, "completionEvidence", path)
-        if structured:
-            result = state.get("result")
-            if (
-                not isinstance(result, str)
-                or result not in ASSESSMENT_RESULTS - {"PARTIAL"}
-            ):
-                raise RunbookError(f"Completed session result is invalid in {path}")
-            expected_steps = state.get("expectedSteps")
-            if (
-                not isinstance(expected_steps, list)
-                or not expected_steps
-                or not all(isinstance(item, str) and item.strip() for item in expected_steps)
-                or len(set(expected_steps)) != len(expected_steps)
-            ):
-                raise RunbookError(f"Completed session expectedSteps are invalid in {path}")
-            validate_score(state.get("score"), "Completed session", path)
+        result = state.get("result")
+        if (
+            not isinstance(result, str)
+            or result not in ASSESSMENT_RESULTS - {"PARTIAL"}
+        ):
+            raise RunbookError(f"Completed session result is invalid in {path}")
+        expected_steps = state.get("expectedSteps")
+        if (
+            not isinstance(expected_steps, list)
+            or not expected_steps
+            or not all(isinstance(item, str) and item.strip() for item in expected_steps)
+            or len(set(expected_steps)) != len(expected_steps)
+        ):
+            raise RunbookError(f"Completed session expectedSteps are invalid in {path}")
+        validate_score(state.get("score"), "Completed session", path)
 
 
 def read_state(path: Path, runbook: dict[str, Any]) -> dict[str, Any]:
@@ -295,6 +297,7 @@ def outdated_session_payload(
             item["id"] for item in state.get("history", []) if item.get("status") == "completed"
         ],
         "statePath": str(path),
+        **model_binding(state),
     }
 
 
@@ -430,8 +433,12 @@ def load_state(
     path: Path,
     runbook: dict[str, Any],
     allow_completed_outdated: bool = False,
+    *,
+    model_id: str | None = None,
 ) -> dict[str, Any]:
     state = read_state(path, runbook)
+    if model_id is not None:
+        verify_model_id(state, model_id)
     expected_hash = content_hash(Path(runbook["path"]))
     current_stored_hash = state["runbookSha256"]
     if current_stored_hash != expected_hash:
@@ -525,17 +532,27 @@ def command_start(
     restart: bool,
     continue_outdated: bool,
     ignore_outdated: bool,
+    model_request: dict[str, Any] | None = None,
+    model_id: str | None = None,
 ) -> None:
+    request = model_request or {}
     path = session_path(repo_root, runbook["id"])
     if not path.exists():
         if restart or continue_outdated or ignore_outdated:
             raise RunbookError(f"No existing session can use the requested option: {runbook['id']}")
+        binding = resolve_binding(runbook, request)
+        verify_model_id(binding, model_id)
+        runbook = {**runbook, **binding}
         state = new_state(runbook)
         write_state(path, state)
         print_json(state_payload(path, state))
         return
 
     previous = read_state(path, runbook)
+    check_resume_request(previous, request)
+    verify_model_id(previous, model_id)
+    # Registry edits and revision choices cannot retarget an existing session.
+    runbook = {**runbook, **model_binding(previous)}
     expected_hash = content_hash(Path(runbook["path"]))
     curr_stored_hash = previous["runbookSha256"]
     outdated = curr_stored_hash != expected_hash
@@ -614,17 +631,43 @@ def command_start(
     print_json(state_payload(path, state))
 
 
+def command_rebind(
+    runbook: dict[str, Any],
+    repo_root: Path,
+    model_family: str,
+    model_id: str,
+) -> None:
+    path = session_path(repo_root, runbook["id"])
+    state = read_state(path, runbook)
+    require_active_state(state, runbook["id"])
+    binding = resolve_binding(
+        {
+            **runbook,
+            "modelFamily": state["modelFamily"],
+            "modelTier": state["modelTier"],
+            "effortLevel": state["effortLevel"],
+        },
+        {"modelFamily": model_family, "modelId": model_id},
+    )
+    if model_binding(state) != binding:
+        state.update(binding)
+        state["updatedAt"] = utc_now()
+        write_state(path, state)
+    print_json(state_payload(path, state))
+
+
 def command_step(
     runbook: dict[str, Any],
     repo_root: Path,
     step_id: str,
     title: str,
     retry: bool,
+    model_id: str,
 ) -> None:
     step_id = require_nonempty(step_id, "Step id")
     title = require_nonempty(title, "Step title")
     path = session_path(repo_root, runbook["id"])
-    state = load_state(path, runbook)
+    state = load_state(path, runbook, model_id=model_id)
     require_active_state(state, runbook["id"])
     current = state["currentStep"]
     if current:
@@ -648,24 +691,23 @@ def command_step(
         raise RunbookError(f"Cannot retry a step with no completed attempt: {step_id}")
     if previous_attempts and not retry:
         raise RunbookError(f"Step already exists in session history: {step_id}")
-    if state.get("assessmentVersion") == ASSESSMENT_VERSION:
-        latest = latest_terminal_attempts(state.get("history", []))
-        failed_steps = [
-            item_id
-            for item_id, item in latest.items()
-            if item.get("stepResult") != "PASS"
-        ]
-        if (
-            state["acceptancePolicy"] == "strict"
-            and state["stepOrder"] == "sequential"
-            and failed_steps
-            and not (retry and step_id in failed_steps)
-        ):
-            failed = ", ".join(sorted(failed_steps))
-            raise RunbookError(
-                "Strict sequential execution cannot advance past a deficient step; "
-                f"retry first: {failed}"
-            )
+    latest = latest_terminal_attempts(state.get("history", []))
+    failed_steps = [
+        item_id
+        for item_id, item in latest.items()
+        if item.get("stepResult") != "PASS"
+    ]
+    if (
+        state["acceptancePolicy"] == "strict"
+        and state["stepOrder"] == "sequential"
+        and failed_steps
+        and not (retry and step_id in failed_steps)
+    ):
+        failed = ", ".join(sorted(failed_steps))
+        raise RunbookError(
+            "Strict sequential execution cannot advance past a deficient step; "
+            f"retry first: {failed}"
+        )
     attempt = (
         max(
             item.get("attempt", 1)
@@ -746,18 +788,17 @@ def command_complete(
     evidence: str,
     raw_result: str | None,
     raw_score: str | None,
+    model_id: str,
 ) -> None:
     evidence = require_nonempty(evidence, "Completion evidence")
     path = session_path(repo_root, runbook["id"])
-    state = load_state(path, runbook)
+    state = load_state(path, runbook, model_id=model_id)
     require_active_state(state, runbook["id"])
     current = state["currentStep"]
     if not current:
         raise RunbookError("No unresolved step is active; set a step first")
-    assessment: dict[str, Any] = {}
-    if state.get("assessmentVersion") == ASSESSMENT_VERSION:
-        step_result, score = structured_step_assessment(state, raw_result, raw_score)
-        assessment = {"stepResult": step_result, "score": score}
+    step_result, score = structured_step_assessment(state, raw_result, raw_score)
+    assessment = {"stepResult": step_result, "score": score}
     now = utc_now()
     record = {
         "id": current["id"],
@@ -776,10 +817,12 @@ def command_complete(
     print_json(state_payload(path, state))
 
 
-def command_block(runbook: dict[str, Any], repo_root: Path, reason: str) -> None:
+def command_block(
+    runbook: dict[str, Any], repo_root: Path, reason: str, model_id: str,
+) -> None:
     reason = require_nonempty(reason, "Block reason")
     path = session_path(repo_root, runbook["id"])
-    state = load_state(path, runbook)
+    state = load_state(path, runbook, model_id=model_id)
     require_active_state(state, runbook["id"])
     current = state["currentStep"]
     if not current:
@@ -798,26 +841,25 @@ def command_skip(
     repo_root: Path,
     reason: str,
     raw_score: str | None,
+    model_id: str,
 ) -> None:
     reason = require_nonempty(reason, "Skip reason")
     path = session_path(repo_root, runbook["id"])
-    state = load_state(path, runbook)
+    state = load_state(path, runbook, model_id=model_id)
     require_active_state(state, runbook["id"])
     current = state["currentStep"]
     if not current:
         raise RunbookError("No unresolved step is active; set a step first")
-    assessment: dict[str, Any] = {}
-    if state.get("assessmentVersion") == ASSESSMENT_VERSION:
-        if state["acceptancePolicy"] == "strict":
-            if raw_score is not None:
-                raise RunbookError("Strict acceptance derives a skipped step score automatically")
-            score = parse_score("0/1", required=True)
-        else:
-            score = parse_score(raw_score, required=True)
-            assert score is not None
-            if score["earned"] != 0:
-                raise RunbookError("A skipped step must earn zero points")
-        assessment = {"stepResult": "SKIPPED", "score": score}
+    if state["acceptancePolicy"] == "strict":
+        if raw_score is not None:
+            raise RunbookError("Strict acceptance derives a skipped step score automatically")
+        score = parse_score("0/1", required=True)
+    else:
+        score = parse_score(raw_score, required=True)
+        assert score is not None
+        if score["earned"] != 0:
+            raise RunbookError("A skipped step must earn zero points")
+    assessment = {"stepResult": "SKIPPED", "score": score}
     now = utc_now()
     record = {
         "id": current["id"],
@@ -908,24 +950,15 @@ def command_finish(
     evidence: str,
     expected_steps: list[str] | None,
     decision: str | None,
+    model_id: str,
 ) -> None:
     evidence = require_nonempty(evidence, "Completion evidence")
     path = session_path(repo_root, runbook["id"])
-    state = load_state(path, runbook)
+    state = load_state(path, runbook, model_id=model_id)
     require_active_state(state, runbook["id"])
     current = state["currentStep"]
     if current:
         raise RunbookError(f"Cannot finish while step {current.get('id')} is unresolved")
-    if state.get("assessmentVersion") != ASSESSMENT_VERSION:
-        now = utc_now()
-        state["status"] = "completed"
-        state["completedAt"] = now
-        state["completionEvidence"] = evidence
-        state["updatedAt"] = now
-        write_state(path, state)
-        print_json(state_payload(path, state))
-        return
-
     normalized_steps = normalize_expected_steps(expected_steps)
     latest = latest_terminal_attempts(state.get("history", []))
     missing = [step_id for step_id in normalized_steps if step_id not in latest]

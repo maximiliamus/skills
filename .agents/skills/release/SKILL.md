@@ -1,16 +1,16 @@
 ---
-name: release-skills
+name: release
 description: Prepare, validate, tag, and atomically push a maximiliamus/skills repository release. Use when the user explicitly asks to release or publish the skills repository, including its version bump, changelog, release commit, annotated tag, and branch-and-tag push. Do not use for a bump-only or verification-only request.
 ---
 
-# Release Skills
+# Release
 
 Orchestrate the complete Git release boundary for the `maximiliamus/skills`
 repository.
 
 ## Authorization Boundary
 
-An explicit request such as `Use $release-skills to release the next skills
+An explicit request such as `Use $release to release the next skills
 version` authorizes the version/changelog mutation, one release-preparation
 commit, one annotated release tag, and one atomic push of `master` plus that
 tag. A request to prepare, preview, or verify does not authorize commit, tag, or
@@ -25,7 +25,7 @@ Before taking release action, load these sources completely:
 
 1. Repository instructions.
 2. [Skills Release Process](references/release-process.md).
-3. `$bump-skills-version`.
+3. `$bump-version`.
 4. `skills/commit-bulk-changes/SKILL.md`.
 
 Follow the referenced release process in order. Treat every preflight,

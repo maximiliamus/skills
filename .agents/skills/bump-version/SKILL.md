@@ -1,9 +1,9 @@
 ---
-name: bump-skills-version
+name: bump-version
 description: Bump the shared maximiliamus/skills repository version and release changelog. Use when preparing the next skills release, defaulting to the next minor version, applying an explicitly requested patch or major bump, or setting an exact X.Y.Z or vX.Y.Z version. Do not use for Spec Kit Canon product version changes.
 ---
 
-# Bump Skills Version
+# Bump Version
 
 Update the repository-level release version and changelog together. This skill
 prepares release metadata; it does not commit, tag, push, or publish.
@@ -11,8 +11,12 @@ prepares release metadata; it does not commit, tag, push, or publish.
 ## Resolve The Target
 
 - When asked to infer the release kind from the changes, use SemVer:
-  - major for breaking changes in skill contracts, command interfaces, or
-    directory schemas;
+  - while the current major version is zero, use minor for breaking changes in
+    skill contracts, command interfaces, or directory schemas;
+  - move from `0.x` to `1.0.0` only when the operator explicitly declares the
+    product ready for its first stable release;
+  - after `1.0.0`, use major for breaking changes in skill contracts, command
+    interfaces, or directory schemas;
   - minor for new skills or backward-compatible feature enhancements;
   - patch for bug fixes, documentation updates, or internal performance
     improvements.
@@ -34,22 +38,22 @@ of modifying a different Python project.
 Run the bundled helper. The default is a minor bump:
 
 ```bash
-python .agents/skills/bump-skills-version/scripts/bump_skills_version.py
+python .agents/skills/bump-version/scripts/bump_version.py
 ```
 
 Select another relative bump:
 
 ```bash
-python .agents/skills/bump-skills-version/scripts/bump_skills_version.py \
+python .agents/skills/bump-version/scripts/bump_version.py \
   --kind patch
-python .agents/skills/bump-skills-version/scripts/bump_skills_version.py \
+python .agents/skills/bump-version/scripts/bump_version.py \
   --kind major
 ```
 
 Set an exact version only when explicitly requested:
 
 ```bash
-python .agents/skills/bump-skills-version/scripts/bump_skills_version.py \
+python .agents/skills/bump-version/scripts/bump_version.py \
   --version v0.2.0
 ```
 

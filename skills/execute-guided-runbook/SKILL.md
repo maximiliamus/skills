@@ -29,6 +29,9 @@ Read the execution policy from optional Markdown frontmatter:
 ---
 id: release-readiness
 description: Verify that a release is ready for publication.
+modelTier: medium
+effortLevel: medium
+modelFamily: frontier
 acceptancePolicy: flexible
 stepOrder: sequential
 acceptanceThreshold: 80%
@@ -56,6 +59,12 @@ The helper returns the resolved execution properties from `resolve`, `run`, and
 `status` and stores them in the session ledger. Defaults are
 `acceptancePolicy: flexible`, `stepOrder: sequential`, and no automatic
 threshold. Do not infer a different mode from prose when a property is present.
+
+`modelTier`, `effortLevel`, and `modelFamily` belong to the runbook's
+frontmatter. Omitted properties use `medium`, `medium`, and `current`
+respectively. Set them in the document to change its execution defaults;
+registration does not accept or store these properties. `list` and `resolve`
+read current document values; existing sessions retain their recorded model binding.
 
 Resolve acceptance independently from ordering:
 
@@ -107,7 +116,8 @@ later in an arbitrary-order runbook. Start a new attempt with:
 
 ```bash
 python <path-to-skill>/scripts/runbook_session.py step \
-  <selector> <step-id> --title "<short title>" --retry
+  <selector> <step-id> --title "<short title>" --retry \
+  --model-id <actual-current-model>
 ```
 
 Use `--retry` only after the same step ID has a completed or skipped history
@@ -131,7 +141,7 @@ minimal format is:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "runbooks": [
     {
       "id": "release",
@@ -141,8 +151,8 @@ minimal format is:
 }
 ```
 
-`title`, `description`, `effortLevel`, and `modelTier` are optional per-entry
-metadata. A stored `description` is an override; omit it to use live document
+`title` and `description` are optional per-entry metadata.
+A stored `description` is an override; omit it to use live document
 metadata. IDs are lowercase kebab-case and do not need to match the Markdown
 filename. IDs matching `path-<12 lowercase hex characters>` are reserved for
 unregistered path sessions. See the bundled
@@ -166,19 +176,24 @@ normalizes `\` separators from Windows-authored files.
 
   Pass `--title` or `--description` when document-derived defaults need an
   override. `--description` remains authoritative until the registry entry is
-  removed. Pass `--effort-level` (`low`, `medium`, `high`, or `extra`) and
-  `--model-tier` (`light`, `medium`, or `heavy`) as needed. This command creates
-  or updates `<repo>/runbooks.json`; it does not copy the Markdown file. When an
+  removed. This command creates or updates `<repo>/runbooks.json`; it does not
+  copy the Markdown file. When an
   existing ID is updated, omitted metadata keeps its previous value. When the
   same path already has an unregistered session, registration migrates that
   ledger and its history to the registered ID. If both identities already have
   ledgers, resolve the conflict explicitly before retrying registration.
+  Its JSON response also shows the document's resolved model properties for
+  inspection; these are not persisted in the registry. Updating registry
+  metadata never retargets an existing session.
 - For `$execute-guided-runbook unregister <id>`, run `unregister <id>`. Remove
   only the registry entry. Never delete the Markdown runbook or its local
   session ledger.
 - For `$execute-guided-runbook status <selector>`, run `status <selector>` and
   summarize the session status, current step, completed steps, blockers, and
-  runbook path. If the result contains `"outdated": true`, describe the
+  runbook path, recorded model family, concrete model, tier, and effort.
+  `list` shows document defaults;
+  `status` shows the pinned ledger, without requiring a model match for inspection.
+  If the result contains `"outdated": true`, describe the
   completion as belonging to an older revision; do not report the current
   runbook as complete until a new session finishes.
 - For `$execute-guided-runbook prune <selector>`, require one explicit policy:
@@ -195,20 +210,109 @@ normalizes `\` separators from Windows-authored files.
 
 Never accept a runbook path outside the repository.
 
-Treat `effort_level` (`low`, `medium`, `high`, `extra`) and `model_tier`
-(`light`, `medium`, `heavy`) as advisory guidance for task planning and
-execution depth.
+## Model Selection And Execution
+
+Keep `modelTier` (`light`, `medium`, `heavy`) independent of generation:
+light covers straightforward bounded work, medium covers ordinary multi-step
+reasoning, and heavy covers complex analysis and consequential judgment.
+`effortLevel` (`low`, `medium`, `high`, `extra`) controls reasoning depth;
+extra means the maximum supported depth. Map these semantics to the executing
+agent's available capabilities; never use a tracked provider mapping.
+
+Normalize operator requests independently of tier:
+
+| Operator request | `modelFamily` |
+| --- | --- |
+| “используй текущую” | `current` |
+| “используй frontier” | `frontier` |
+| “используй предыдущие” | `predecessor` |
+| “используй family 5.6” | `family:5.6` |
+| “используй exact model-id” | `exact:<model-id>` |
+
+An explicit request supplies `--model-family` for a new session only.
+Otherwise use `modelFamily` from the document, or `current` when omitted. For
+`current`, use the concrete identity of the current session without resolving
+a generation. For every other value, resolve frontier, its **immediate**
+predecessor generation, or the requested family from models available to the
+current agent. Select one suitable concrete identity. For `exact`, use only
+the requested identity while that binding is active. Stop before
+execution if the generation, family, or a suitable model is ambiguous or
+unavailable. Never infer generation from a session name or label, fall back to a
+different generation, or mix generations.
+
+Before starting, read the [agent-agnostic execution contract](references/model-execution.md).
+Use the current agent's own capabilities to inspect available models and prove
+its concrete identity. A session name or a requested model is not proof. If an
+explicit selection does not match the current identity, report the mismatch and
+stop before creating a ledger. Do not switch or create a session, ask the
+operator to launch one, or choose a fallback. Wait for the operator to decide
+what to do next. If the agent cannot prove its identity, stop with that concrete
+limitation.
+
+If the operator then explicitly directs execution on the model selected by the
+runbook, use the current agent runtime's native model-session or delegation
+capability to start a target context on that concrete model. The initiating
+agent remains the operator-facing coordinator when the runtime supports it: it
+forwards the target context's questions to the operator, returns the operator's
+answers unchanged, and reports the target context's evidence and results. Do
+not require the operator to move the conversation manually when native
+proxying is available.
+
+Pass the repository root, runbook selector, resolved `modelFamily`, concrete
+`modelId`, `modelTier`, `effortLevel`, existing ledger status, and the
+instruction to execute the whole runbook to the target context. The target
+context must independently prove its actual `modelId` before it creates or
+resumes the ledger. A new runbook therefore has no ledger until the target
+context invokes `run`; an existing runbook resumes its single ledger without
+`rebind` when the target identity already matches the recorded binding. Keep
+the runbook in that target context until completion or another explicit
+operator decision changes the binding or starts over. If the runtime cannot
+create the required context or proxy its interaction, report that limitation
+and stop without a fallback.
+
+The helper records `modelFamily`, `modelId`, `modelTier`, and `effortLevel`.
+Every execution command requires the actual current identity as `--model-id`
+and compares it with the ledger. On resume, use the recorded values; do not
+resolve the generation again against a changed model catalog. A mismatch fails
+closed and never creates a parallel ledger. Registry edits, path migrations,
+revision decisions, and restarts preserve the binding unless the operator
+explicitly changes it.
+
+After a mismatch, do nothing until the operator gives a new instruction. If
+the operator says to continue on the current model, update the existing ledger
+in place and preserve all progress:
+
+```bash
+python <path-to-skill>/scripts/runbook_session.py rebind <selector> \
+  --model-family current --model-id <actual-current-model>
+```
+
+For another explicit family, resolve and verify that selection first, then use
+the same command with its canonical `<family>` and actual model ID. `rebind`
+changes only `modelFamily`, `modelId`, and `updatedAt`; it preserves
+`modelTier`, `effortLevel`, the current step, history, decisions, and runbook
+revision. Invoke it only after an explicit operator instruction to change the
+model and continue the existing runbook.
 
 ## Start Or Resume
 
-1. Resolve and initialize the session:
+1. Use `resolve <selector>` and inspect an existing `status <selector>` before
+   execution. Resolve the model only for a new session. After the current
+   session proves its identity and satisfies the selection, start with:
 
    ```bash
-   python <path-to-skill>/scripts/runbook_session.py run <selector>
+   python <path-to-skill>/scripts/runbook_session.py run <selector> \
+     --model-id <actual-current-model>
    ```
 
-2. Read the resolved runbook completely before acting. The helper validates its
-   content hash on every session operation.
+   Add `--model-family <family>` only for an explicit operator override.
+   Resume an existing ledger with `run <selector>` from its verified model
+   session. Pass `--model-id <actual-current-model>` to `step`, `complete`,
+   `block`, `skip`, and `finish` as well. Read the resolved runbook completely
+   before acting. The helper validates its content hash on every session operation.
+2. Keep all saved progress and later operator decisions in that same ledger.
+   A model change continues from that ledger after an explicit `rebind`. Use
+   only the session controls provided by the current agent environment.
 3. If the runbook changed while its session is still unfinished, the helper
    returns `operator_decision_required`. Prompt the operator and wait for an
    explicit decision:
@@ -216,8 +320,12 @@ execution depth.
      new revision.
    - **Ignore** (`--ignore`): archives the unfinished ledger and starts from the
      first step.
-4. Use `--restart` only when explicitly asked to restart a same-revision
-   session.
+4. Start from the first step only when the operator explicitly says to start
+   over. Use `--restart` for a same-revision session. If the runbook changed,
+   use `--ignore` after the helper reports `operator_decision_required`. When
+   the new run must use another model, perform the explicit `rebind` first;
+   the restart or ignore operation then archives the old ledger and creates a
+   clean one with the new binding.
 5. If a current step exists, resume it. Otherwise select the next actionable
    instruction according to the runbook's resolved ordering policy and exclude
    instructions already present in completed or skipped history.
@@ -226,7 +334,8 @@ Record the selected step before presenting or executing it:
 
 ```bash
 python <path-to-skill>/scripts/runbook_session.py step \
-  <selector> <step-id> --title "<short title>"
+  <selector> <step-id> --title "<short title>" \
+  --model-id <actual-current-model>
 ```
 
 ## Execute One Step
@@ -275,19 +384,22 @@ because the helper derives `1/1` for pass and `0/1` for fail:
 # flexible or always
 python <path-to-skill>/scripts/runbook_session.py complete \
   <selector> --evidence "<what was checked and where>" \
-  --result <pass|fail> --score <earned/available>
+  --result <pass|fail> --score <earned/available> \
+  --model-id <actual-current-model>
 
 # strict
 python <path-to-skill>/scripts/runbook_session.py complete \
   <selector> --evidence "<what was checked and where>" \
-  --result <pass|fail>
+  --result <pass|fail> \
+  --model-id <actual-current-model>
 ```
 
 If blocked, record the blocker:
 
 ```bash
 python <path-to-skill>/scripts/runbook_session.py block \
-  <selector> --reason "<concrete blocker>"
+  <selector> --reason "<concrete blocker>" \
+  --model-id <actual-current-model>
 ```
 
 Skip a step only when permitted. Under `flexible` and `always`, record zero
@@ -298,11 +410,13 @@ the helper records a failed `0/1` assessment:
 # flexible or always
 python <path-to-skill>/scripts/runbook_session.py skip \
   <selector> --reason "<why this step does not apply>" \
-  --score <0/available>
+  --score <0/available> \
+  --model-id <actual-current-model>
 
 # strict
 python <path-to-skill>/scripts/runbook_session.py skip \
-  <selector> --reason "<why this step does not apply>"
+  <selector> --reason "<why this step does not apply>" \
+  --model-id <actual-current-model>
 ```
 
 ## Finish
@@ -314,7 +428,8 @@ current runbook revision and pass every ID, including skipped steps:
 ```bash
 python <path-to-skill>/scripts/runbook_session.py finish \
   <selector> --evidence "<final completion criteria and evidence>" \
-  --expected-step <step-id> [--expected-step <step-id> ...]
+  --expected-step <step-id> [--expected-step <step-id> ...] \
+  --model-id <actual-current-model>
 ```
 
 For a flexible result below its automatic threshold, `finish` returns
@@ -327,6 +442,7 @@ Report both `status` and `result`, plus the natural and percentage score. Do not
 describe `ACCEPTED` or `REJECTED` as fully passing, and preserve every
 limitation attached to an accepted result.
 
-Ledgers created by an earlier helper version remain readable and use their
-legacy recording protocol until restarted. A restart creates a structured
-assessment ledger governed by the rules above.
+Registry and session schemas are version 2. Version 1 ledgers and registries
+are rejected; missing execution fields are never inferred. Preserve old ledger
+files as evidence and resolve their disposition explicitly before starting a
+new version 2 session. Do not claim their steps were executed on a recorded model.

@@ -28,7 +28,7 @@ Do not bump files until every preflight condition passes.
 
 ## Bump And Validate
 
-1. Invoke `$bump-skills-version` with the resolved kind or exact version.
+1. Invoke `$bump-version` with the resolved kind or exact version.
 2. Require the resulting diff to contain exactly `pyproject.toml` and
    `CHANGELOG.md`, with nothing staged.
 3. Verify that `[project].version`, the release heading

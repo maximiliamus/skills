@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add agent-agnostic model-family selection to `execute-guided-runbook` with
+  `current`, `frontier`, `previous`, `family:<version>`, and
+  `exact:<model-id>` modes, defaulting to the current session model.
+- Record `modelFamily`, concrete `modelId`, `modelTier`, and `effortLevel` in
+  version 2 session ledgers, fail closed on an unapproved model mismatch, and
+  support an explicit operator-directed rebind that preserves saved progress.
+- Keep model resolution within the executing agent's runtime, without provider
+  mappings or agent-specific integrations, and stop without creating a ledger
+  when the current model does not satisfy an explicit selection.
+- Define an operator-authorized, runtime-native handoff in which the initiating
+  agent proxies the selected model context while only that context creates or
+  resumes the runbook ledger.
+- Rename the repository release helpers to `$bump-version` and `$release`.
+- Keep breaking pre-1.0 releases on minor increments and reserve `1.0.0` for an
+  explicit product-readiness decision.
+
 ## [0.2.0] - 2026-09-02
 
 - Expand `execute-guided-runbook` with structured acceptance policies,

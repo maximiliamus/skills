@@ -10,8 +10,8 @@ PUBLIC_SKILL_NAMES = [
     "execute-guided-runbook",
 ]
 INTERNAL_SKILL_NAMES = [
-    "bump-skills-version",
-    "release-skills",
+    "bump-version",
+    "release",
 ]
 
 
@@ -43,13 +43,13 @@ def test_skills_exist():
     assert (skills_dir / "execute-guided-runbook" / "README.md").is_file()
     assert (
         internal_skills_dir
-        / "bump-skills-version"
+        / "bump-version"
         / "scripts"
-        / "bump_skills_version.py"
+        / "bump_version.py"
     ).is_file()
     assert (
         internal_skills_dir
-        / "release-skills"
+        / "release"
         / "references"
         / "release-process.md"
     ).is_file()
@@ -143,13 +143,13 @@ def test_runbook_registry_schema_restricts_paths():
 
 def test_release_skill_preserves_release_safety_boundaries():
     skill_content = (
-        ROOT / ".agents" / "skills" / "release-skills" / "SKILL.md"
+        ROOT / ".agents" / "skills" / "release" / "SKILL.md"
     ).read_text(encoding="utf-8")
     reference_content = (
         ROOT
         / ".agents"
         / "skills"
-        / "release-skills"
+        / "release"
         / "references"
         / "release-process.md"
     ).read_text(encoding="utf-8")
@@ -157,7 +157,7 @@ def test_release_skill_preserves_release_safety_boundaries():
     normalized_contract = " ".join((skill_content + reference_content).split())
 
     assert "references/release-process.md" in normalized_skill
-    assert "$bump-skills-version" in normalized_contract
+    assert "$bump-version" in normalized_contract
     assert "skills/commit-bulk-changes/SKILL.md" in normalized_contract
     assert "python -m pytest" in normalized_contract
     assert "python -m ruff check" in normalized_contract

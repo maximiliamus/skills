@@ -18,10 +18,12 @@ from .model import (
     ID_PATTERN,
     MODEL_TIERS,
     REGISTRY_FIELDS,
+    REGISTRY_SCHEMA_VERSION,
     STEP_ORDERS,
     RunbookError,
     valid_acceptance_threshold,
 )
+from .model_binding import DEFAULT_MODEL_FAMILY, normalize_model_family
 from .state import read_state, sync_state_metadata
 from .storage import (
     inside_repo,
@@ -81,7 +83,7 @@ def load_registry(path: Path, repo_root: Path) -> dict[str, dict[str, Any]]:
         fields = ", ".join(sorted(unknown_top_level))
         raise RunbookError(f"Unknown registry field(s) in {path}: {fields}")
     version = data.get("schemaVersion")
-    if type(version) is not int or version != 1:
+    if type(version) is not int or version != REGISTRY_SCHEMA_VERSION:
         raise RunbookError(f"Unsupported runbook registry schema in {path}")
 
     entries = data.get("runbooks")
@@ -95,7 +97,10 @@ def load_registry(path: Path, repo_root: Path) -> dict[str, dict[str, Any]]:
         unknown_entry_fields = set(raw_entry) - REGISTRY_FIELDS
         if unknown_entry_fields:
             fields = ", ".join(sorted(unknown_entry_fields))
-            raise RunbookError(f"Unknown runbook field(s) in {path}: {fields}")
+            hint = ""
+            if unknown_entry_fields & {"modelTier", "effortLevel", "modelFamily"}:
+                hint = " Set modelTier, effortLevel and modelFamily in Markdown frontmatter."
+            raise RunbookError(f"Unknown runbook field(s) in {path}: {fields}.{hint}")
         runbook_id = raw_entry.get("id")
         relative_path = raw_entry.get("path")
         if not isinstance(runbook_id, str) or not runbook_id.strip():
@@ -112,8 +117,6 @@ def load_registry(path: Path, repo_root: Path) -> dict[str, dict[str, Any]]:
         optional_values = {
             "title": raw_entry.get("title"),
             "description": raw_entry.get("description"),
-            "effortLevel": raw_entry.get("effortLevel"),
-            "modelTier": raw_entry.get("modelTier"),
         }
         for field, value in optional_values.items():
             if field in raw_entry and (not isinstance(value, str) or not value.strip()):
@@ -121,8 +124,6 @@ def load_registry(path: Path, repo_root: Path) -> dict[str, dict[str, Any]]:
                     f"Registry field {field} must be a non-empty string: {raw_entry}"
                 )
         resolved_title = (optional_values["title"] or derived_title).strip()
-        effort_level = optional_values["effortLevel"] or DEFAULT_EFFORT_LEVEL
-        model_tier = optional_values["modelTier"] or DEFAULT_MODEL_TIER
         entry = {
             "id": runbook_id,
             "title": resolved_title,
@@ -130,18 +131,12 @@ def load_registry(path: Path, repo_root: Path) -> dict[str, dict[str, Any]]:
             "description": (
                 optional_values["description"] or f"Repository runbook: {resolved_title}."
             ).strip(),
-            "effortLevel": effort_level,
-            "modelTier": model_tier,
             "_descriptionOverride": "description" in raw_entry,
         }
         runbook_id = entry["id"]
         validate_registered_id(runbook_id)
         if runbook_id in registry:
             raise RunbookError(f"Duplicate runbook id: {runbook_id}")
-        if entry["effortLevel"] not in EFFORT_LEVELS:
-            raise RunbookError(f"Invalid effort level for {runbook_id}: {entry['effortLevel']}")
-        if entry["modelTier"] not in MODEL_TIERS:
-            raise RunbookError(f"Invalid model tier for {runbook_id}: {entry['modelTier']}")
         registry[runbook_id] = entry  # type: ignore[assignment]
     return registry
 
@@ -159,7 +154,7 @@ def persisted_registry_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def write_registry(path: Path, registry: dict[str, dict[str, Any]]) -> None:
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": REGISTRY_SCHEMA_VERSION,
         "runbooks": [
             persisted_registry_entry(registry[runbook_id])
             for runbook_id in sorted(registry)
@@ -183,8 +178,6 @@ def resolve_runbook(
             "path": str(runbook_path),
             "relativePath": runbook_path.relative_to(repo_root.resolve()).as_posix(),
             "description": entry["description"],
-            "effortLevel": entry["effortLevel"],
-            "modelTier": entry["modelTier"],
             "_descriptionOverride": entry.get("_descriptionOverride", False),
             "registered": True,
         }
@@ -201,8 +194,6 @@ def resolve_runbook(
             "path": str(runbook_path),
             "relativePath": relative_path,
             "description": "Unregistered repository runbook.",
-            "effortLevel": DEFAULT_EFFORT_LEVEL,
-            "modelTier": DEFAULT_MODEL_TIER,
             "registered": False,
         }
 
@@ -230,6 +221,9 @@ def resolve_runbook(
 
 def runbook_document_properties(text: str, path: Path) -> dict[str, Any]:
     properties: dict[str, Any] = {
+        "effortLevel": DEFAULT_EFFORT_LEVEL,
+        "modelTier": DEFAULT_MODEL_TIER,
+        "modelFamily": DEFAULT_MODEL_FAMILY,
         "acceptancePolicy": DEFAULT_ACCEPTANCE_POLICY,
         "stepOrder": DEFAULT_STEP_ORDER,
         "acceptanceThreshold": None,
@@ -247,12 +241,16 @@ def runbook_document_properties(text: str, path: Path) -> dict[str, Any]:
     document = parse_runbook_frontmatter(lines[1:closing_index], path)
 
     supported = {
+        "effortLevel",
+        "modelTier",
+        "modelFamily",
         "id",
         "description",
         "acceptancePolicy",
         "stepOrder",
         "acceptanceThreshold",
     }
+    model_choices = {"effortLevel": EFFORT_LEVELS, "modelTier": MODEL_TIERS}
     for key, value in document.items():
         if key not in supported:
             continue
@@ -264,12 +262,24 @@ def runbook_document_properties(text: str, path: Path) -> dict[str, Any]:
             raise RunbookError(
                 f"Runbook frontmatter property {key} must be a string in {path}"
             )
-        value = value.strip()
+        if key == "modelFamily":
+            try:
+                value = normalize_model_family(value)
+            except RunbookError as exc:
+                raise RunbookError(f"Invalid runbook frontmatter in {path}: {exc}") from exc
+        else:
+            value = value.strip()
         if key == "id":
             validate_registered_id(value)
         if key == "description" and not value:
             raise RunbookError(
                 f"Runbook frontmatter description must not be empty in {path}"
+            )
+        if key in model_choices and value not in model_choices[key]:
+            choices = ", ".join(sorted(model_choices[key]))
+            raise RunbookError(
+                f"Invalid runbook frontmatter property {key}={value!r} in {path}; "
+                f"expected one of: {choices}"
             )
         if key == "acceptancePolicy" and value not in ACCEPTANCE_POLICIES:
             choices = ", ".join(sorted(ACCEPTANCE_POLICIES))
@@ -460,13 +470,17 @@ def command_list(
     entries: list[dict[str, Any]] = []
     for runbook_id in sorted(registry):
         entry = registry[runbook_id]
-        if repo_root is not None and not entry.get("_descriptionOverride", False):
+        if repo_root is not None:
             resolved = resolve_runbook(runbook_id, repo_root, registry, True)
-            entry = {**entry, "description": resolved["description"]}
+            entry = {**entry, **{
+                key: resolved[key] for key in (
+                    "description", "effortLevel", "modelTier", "modelFamily",
+                )
+            }}
         entries.append(public_registry_entry(entry))
     print_json(
         {
-            "schemaVersion": 1,
+            "schemaVersion": REGISTRY_SCHEMA_VERSION,
             "runbooks": entries,
         }
     )
@@ -480,8 +494,6 @@ def command_register(
     raw_path: str,
     title: str | None,
     description: str | None,
-    effort_level: str | None,
-    model_tier: str | None,
 ) -> None:
     validate_registered_id(runbook_id)
     runbook_path, relative_path = resolve_runbook_path(raw_path, repo_root)
@@ -514,34 +526,25 @@ def command_register(
     else:
         resolved_description = f"Repository runbook: {resolved_title}."
 
-    resolved_effort_level = (
-        effort_level
-        if effort_level is not None
-        else existing["effortLevel"]
-        if existing is not None
-        else DEFAULT_EFFORT_LEVEL
-    )
-    resolved_model_tier = (
-        model_tier
-        if model_tier is not None
-        else existing["modelTier"]
-        if existing is not None
-        else DEFAULT_MODEL_TIER
-    )
     entry = {
         "id": runbook_id,
         "title": resolved_title,
         "path": relative_path,
         "description": resolved_description,
-        "effortLevel": resolved_effort_level,
-        "modelTier": resolved_model_tier,
         "_descriptionOverride": description_override,
     }
     source_runbook_id = path_runbook_id(relative_path)
     migration: dict[str, Any] | None = None
     created_target_state = False
 
-    with session_locks(repo_root, [source_runbook_id, runbook_id]) as state_paths:
+    def validate_session_candidate(source: Path, candidate_id: object) -> None:
+        read_state(source, {"id": candidate_id})
+
+    with session_locks(
+        repo_root,
+        [source_runbook_id, runbook_id],
+        validate_candidate=validate_session_candidate,
+    ) as state_paths:
         source_state_path = state_paths[source_runbook_id]
         target_state_path = state_paths[runbook_id]
 
@@ -559,8 +562,6 @@ def command_register(
                     "title": entry["title"],
                     "relativePath": entry["path"],
                     "registered": True,
-                    "effortLevel": entry["effortLevel"],
-                    "modelTier": entry["modelTier"],
                     "acceptancePolicy": document_properties["acceptancePolicy"],
                     "stepOrder": document_properties["stepOrder"],
                     "acceptanceThreshold": document_properties["acceptanceThreshold"],
@@ -598,7 +599,12 @@ def command_register(
 
     print_json(
         {
-            "registered": public_registry_entry(registry[runbook_id]),
+            "registered": {
+                **public_registry_entry(registry[runbook_id]),
+                **{key: document_properties[key] for key in (
+                    "effortLevel", "modelTier", "modelFamily",
+                )},
+            },
             "registryPath": str(registry_path),
             "sessionMigration": migration,
         }
