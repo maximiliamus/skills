@@ -35,6 +35,13 @@ From the `maximiliamus/skills` repository root, inspect the worktree and ensure
 unrelated work. Require `[project].name = "maximiliamus-skills"`; stop instead
 of modifying a different Python project.
 
+Apply the repository changelog rule to every entry, whether it was written by
+hand, promoted from `Unreleased`, or derived from commits. Low-level
+implementation details do not belong in the changelog. Keep observable product
+behavior and compatibility or migration information that users need; omit
+internal design choices, refactors, tests, release mechanics, and versioning
+policy.
+
 Run the bundled helper. The default is a minor bump:
 
 ```bash
@@ -75,7 +82,10 @@ The helper must:
 1. Read the updated version from `pyproject.toml`.
 2. Confirm `CHANGELOG.md` contains exactly one matching release heading and a
    fresh `## [Unreleased]` section above it.
-3. Confirm the working-tree changes introduced by the bump are limited to
+3. Read the complete release section and validate every entry against the
+   repository changelog rule; do not accept derived commit subjects without
+   curating them.
+4. Confirm the working-tree changes introduced by the bump are limited to
    `pyproject.toml` and `CHANGELOG.md`.
-4. Report the resolved version and changed files. Do not commit, tag, push, or
+5. Report the resolved version and changed files. Do not commit, tag, push, or
    create a GitHub Release.

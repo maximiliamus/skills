@@ -9,6 +9,10 @@
 - After code changes, run `python -m pytest` and `python -m ruff check`. After Markdown
   changes, also run `npx --yes markdownlint-cli2 "**/*.md"`.
 - Preserve unrelated staged, unstaged, and untracked user changes.
+- Keep `CHANGELOG.md` at the level of user-visible product behavior. Low-level
+  implementation details do not belong in changelog entries. Omit internal
+  design choices, refactors, tests, release mechanics, and versioning policy,
+  and validate every added or edited entry against this rule before committing.
 
 ## Code review rules
 
