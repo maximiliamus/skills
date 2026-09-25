@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Include commit bodies for substantive changes by default in
+  `commit-bulk-changes`, while allowing one-line messages for fully mechanical
+  or editorial changes.
+
 ## [0.3.0] - 2026-09-10
 
 - Add model selection to `execute-guided-runbook` with `current`, `frontier`,

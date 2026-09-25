@@ -98,7 +98,7 @@ concern; larger change sets may be split into multiple coherent commits.
      unstage them. For a group containing only tracked files whose complete
      working-tree changes are authorized, inspect `git diff HEAD -- <paths>` and
      `git diff --check HEAD -- <paths>`, then commit only those paths with
-     `git commit --only -m "<message>" -- <paths>`. Verify afterward that the
+     `git commit --only -F <message-file> -- <paths>`. Verify afterward that the
      unrelated staged diff is unchanged.
    - If the intended group contains an untracked file, a rename with an
      untracked destination, or a partially staged path while unrelated changes
@@ -139,6 +139,16 @@ concern; larger change sets may be split into multiple coherent commits.
 - Follow any commit-message language or character rules in the active context.
   When none are specified, use a concise English subject, normally no longer
   than 72 characters, and ASCII characters only.
-- Add a body when the subject does not adequately explain motivation,
-  constraints, or impact.
+- Under the default convention, include a body for every commit that changes
+  behavior, a contract, validation, architecture, or a development or release
+  workflow, regardless of type or diff size. Explain why the change was needed
+  and the key decision, effect, or boundary that the subject cannot convey.
+  Separate the body from the subject with one blank line. Do not merely repeat
+  the subject or list changed files.
+- Omit the body only when the entire change is mechanical or editorial and the
+  subject fully describes it, such as a typo, formatting, a faithful rename,
+  regenerated fixtures, or a version-pin sync. Include a body if the same
+  commit also contains a substantive change.
+- Write a multiline message to a temporary UTF-8 file outside the repository
+  and pass it to `git commit -F`; remove the file after the commit.
 - Do not claim broader behavior than the staged diff implements.
