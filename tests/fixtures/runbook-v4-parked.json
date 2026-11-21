@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 4,
+  "runId": "5d8ba084-55e4-4e7e-afaf-68f875d4efab",
+  "runbook": {
+    "path": "run.md",
+    "sha256": "58ed98054aee6f9675929ba140ec36b81f8d5c7bab8701751ec26347fd4b1b2f",
+    "id": "review-docs"
+  },
+  "contract": {
+    "maxParallelSteps": 1,
+    "delegateSteps": false,
+    "stepOrder": "sequential",
+    "acceptancePolicy": "always",
+    "acceptanceThreshold": null,
+    "steps": [
+      {
+        "id": "first",
+        "title": "First check",
+        "deliverables": [],
+        "instruction": {
+          "startLine": 9,
+          "endLine": 12,
+          "path": "run.md",
+          "sha256": "58ed98054aee6f9675929ba140ec36b81f8d5c7bab8701751ec26347fd4b1b2f"
+        },
+        "dependsOn": {},
+        "modelFamily": "current",
+        "modelFamilyOrigin": "default",
+        "explicitTier": false,
+        "explicitEffort": false,
+        "modelTier": "medium",
+        "effortLevel": "medium",
+        "delegateSteps": false,
+        "maxAttempts": 2,
+        "procedure": [],
+        "gapCauses": [],
+        "reuse": false,
+        "reassessAfterInvalidation": false,
+        "points": 1
+      },
+      {
+        "id": "second",
+        "title": "Second check",
+        "deliverables": [],
+        "instruction": {
+          "startLine": 14,
+          "endLine": 16,
+          "path": "run.md",
+          "sha256": "58ed98054aee6f9675929ba140ec36b81f8d5c7bab8701751ec26347fd4b1b2f"
+        },
+        "dependsOn": {},
+        "modelFamily": "current",
+        "modelFamilyOrigin": "default",
+        "explicitTier": false,
+        "explicitEffort": false,
+        "modelTier": "medium",
+        "effortLevel": "medium",
+        "delegateSteps": false,
+        "maxAttempts": 2,
+        "procedure": [],
+        "gapCauses": [],
+        "reuse": false,
+        "reassessAfterInvalidation": false,
+        "points": 1
+      }
+    ],
+    "instructions": "---\nmaxAttempts: 2\nacceptancePolicy: always\n---\n\n# Review documents\n\n<!-- step: first -->\n## First check\n\nInspect inputs.\n\n<!-- step: second -->\n## Second check\n\nInspect stakeholders.\n"
+  },
+  "events": [
+    {
+      "seq": 1,
+      "at": "2026-11-20T17:00:44+00:00",
+      "requestId": "5d8ba084-55e4-4e7e-afaf-68f875d4efab",
+      "requestDigest": "11d016560946e08e9966b4db96e506367a7458770e6f21e9082915c8cbc3ea65",
+      "type": "reserve",
+      "data": {
+        "ownershipToken": "CbBvFV0PfH5nf2mA4HXCGX1xxT6xO0L4awvmQ9FSwQo"
+      }
+    },
+    {
+      "seq": 2,
+      "at": "2026-11-20T17:00:45+00:00",
+      "requestId": "b429a38e-5a28-416f-95bd-71ade851a56a",
+      "requestDigest": "d5207d5e7b2ef1d240717b46495c232a4dfe1ce0ebb56e44039322443f8297bb",
+      "type": "admit",
+      "data": {
+        "stepId": "first",
+        "execution": "inline",
+        "sources": [],
+        "prerequisites": {},
+        "number": 1,
+        "requirements": {
+          "modelFamily": "current",
+          "modelFamilyOrigin": "default",
+          "modelTier": "medium",
+          "effortLevel": "medium",
+          "explicitTier": false,
+          "explicitEffort": false,
+          "delegateSteps": false
+        }
+      }
+    },
+    {
+      "seq": 3,
+      "at": "2026-11-20T17:00:45+00:00",
+      "requestId": "a7eec07d-86dc-44a6-a978-df3035667bf8",
+      "requestDigest": "bb2db7ee845eb1e1761b62d24299200d3657b9c1b2a88d6be66680b86e097196",
+      "type": "observe",
+      "data": {
+        "attempt": 2,
+        "kind": "question",
+        "text": "Are the inputs approved?"
+      }
+    },
+    {
+      "seq": 4,
+      "at": "2026-11-20T17:00:45+00:00",
+      "requestId": "587af61c-9ffe-4851-931f-badc3836bd00",
+      "requestDigest": "289810c40d7784d2841f11f68771e691813936a2202abd0257ee1b51da7d0de5",
+      "type": "observe",
+      "data": {
+        "attempt": 2,
+        "kind": "stopped",
+        "evidence": {
+          "statement": "The waiting worker and its commands ended.",
+          "reference": "fixture:worker-exit"
+        }
+      }
+    }
+  ]
+}

@@ -9,6 +9,12 @@ Use this skill before every Git commit. Despite its historical name, the skill
 supports any change size: one file produces one commit when it represents one
 concern; larger change sets may be split into multiple coherent commits.
 
+## Initialization And Updates
+
+Handle `$commit-bulk-changes init` and `$commit-bulk-changes update` before
+the commit workflow. Neither command needs any actions. Reply only `nothing to do`
+and finish the request. Do not inspect changes, create files, stage or commit.
+
 ## Scope and Authorization
 
 - Commit only changes produced for the current task or explicitly placed in

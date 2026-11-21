@@ -19,6 +19,10 @@ For a repository without a first commit, it preserves the requested scope. It
 creates a complete snapshot with the message `Initial commit.` only when the
 complete non-ignored worktree is explicitly authorized.
 
+## Skill Configuration
+
+`init` and `update` reply only `nothing to do`.
+
 ## Usage
 
 Invoke the skill with a request such as:

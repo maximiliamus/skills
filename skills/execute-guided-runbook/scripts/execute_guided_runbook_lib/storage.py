@@ -5,14 +5,13 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
-import ntpath
 import os
 import stat
 import sys
 import time
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import ExitStack, contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -20,35 +19,15 @@ from typing import Any, BinaryIO
 from .model import (
     ATOMIC_REPLACE_TIMEOUT_SECONDS,
     DEFAULT_REGISTRY_FILENAME,
-    ID_PATTERN,
-    LEGACY_HASH_FILENAME_ID_PATTERN,
     LOCK_DIRECTORY_NAME,
     LOCK_POLL_SECONDS,
     LOCK_TIMEOUT_SECONDS,
-    MAX_DIRECT_SESSION_ID_LENGTH,
-    SESSION_SCHEMA_VERSION,
     RunbookError,
 )
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def read_json(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise RunbookError(f"File does not exist: {path}") from exc
-    except UnicodeDecodeError as exc:
-        raise RunbookError(f"File is not valid UTF-8: {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise RunbookError(f"Invalid JSON in {path}: {exc}") from exc
-    except OSError as exc:
-        raise RunbookError(f"Could not read JSON file {path}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise RunbookError(f"Expected a JSON object in {path}")
-    return data
 
 
 def serialize_json(payload: Any, *, subject: str) -> str:
@@ -64,10 +43,70 @@ def serialize_json(payload: Any, *, subject: str) -> str:
 
 def find_repo_root(start_dir: Path | None = None) -> Path:
     current = (start_dir or Path.cwd()).resolve()
-    for parent in [current, *current.parents]:
+    ancestors = [current, *current.parents]
+    for parent in ancestors:
         if (parent / ".git").exists():
             return parent
+    for parent in ancestors:
+        if (
+            (parent / DEFAULT_REGISTRY_FILENAME).is_file()
+            or (
+                parent != Path.home()
+                and (parent / ".agents/skills/execute-guided-runbook/SKILL.md").is_file()
+            )
+        ):
+            return parent
+    for parent in ancestors:
+        if (parent / "AGENTS.md").is_file():
+            return parent
     return current
+
+
+def preserve_replacement_permissions(target: Path, temporary: Path) -> None:
+    """Apply the existing file's access rules to its replacement before renaming it."""
+    if os.name == "nt":
+        copy_windows_dacl(target, temporary)
+    else:
+        temporary.chmod(stat.S_IMODE(target.stat().st_mode))
+
+
+def copy_windows_dacl(target: Path, temporary: Path) -> None:
+    from ctypes import POINTER, WinDLL, WinError, byref, c_void_p, get_last_error
+    from ctypes.wintypes import BOOL, DWORD, LPCWSTR, WORD
+
+    security = WinDLL("advapi32", use_last_error=True)
+    local_free = WinDLL("kernel32").LocalFree
+    local_free.argtypes = [c_void_p]
+    local_free.restype = c_void_p
+    read = security.GetNamedSecurityInfoW
+    read.argtypes = [LPCWSTR, DWORD, DWORD, c_void_p, c_void_p, POINTER(c_void_p), c_void_p,
+                     POINTER(c_void_p)]
+    read.restype = DWORD
+    control = security.GetSecurityDescriptorControl
+    control.argtypes = [c_void_p, POINTER(WORD), POINTER(DWORD)]
+    control.restype = BOOL
+    write = security.SetNamedSecurityInfoW
+    write.argtypes = [LPCWSTR, DWORD, DWORD, c_void_p, c_void_p, c_void_p, c_void_p]
+    write.restype = DWORD
+
+    file_object, dacl_information = 1, 4
+    dacl, descriptor = c_void_p(), c_void_p()
+    error = read(str(target), file_object, dacl_information, None, None, byref(dacl), None,
+                 byref(descriptor))
+    if error:
+        raise WinError(error)
+    try:
+        flags, revision = WORD(), DWORD()
+        if not control(descriptor, byref(flags), byref(revision)):
+            raise WinError(get_last_error())
+        # Retain whether the DACL inherits access rules from the parent.
+        inheritance = 0x80000000 if flags.value & 0x1000 else 0x20000000
+        error = write(str(temporary), file_object, dacl_information | inheritance, None, None,
+                      dacl, None)
+        if error:
+            raise WinError(error)
+    finally:
+        local_free(descriptor)
 
 
 def write_json_atomic(path: Path, payload: Any, *, default_mode: int) -> None:
@@ -75,9 +114,7 @@ def write_json_atomic(path: Path, payload: Any, *, default_mode: int) -> None:
     temporary: Path | None = None
     descriptor: int | None = None
     try:
-        existing_mode: int | None = None
-        if path.exists() and not path.is_symlink():
-            existing_mode = stat.S_IMODE(path.stat().st_mode)
+        replacing = path.exists() and not path.is_symlink()
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
         descriptor = os.open(
@@ -95,8 +132,10 @@ def write_json_atomic(path: Path, payload: Any, *, default_mode: int) -> None:
         with handle:
             handle.write(serialized)
             handle.write("\n")
-        if os.name != "nt" and existing_mode is not None:
-            temporary.chmod(existing_mode)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if replacing:
+            preserve_replacement_permissions(path, temporary)
         replace_with_retry(temporary, path)
     except OSError as exc:
         raise RunbookError(f"Could not write JSON file {path}: {exc}") from exc
@@ -136,12 +175,14 @@ def lock_file_path(repo_root: Path, target: Path) -> Path:
             ".runbooks",
             subject="Session state directory",
         )
+        # On Windows a parent created during child resolution can leave a
+        # spurious extended-path prefix, which looks like redirection.
+        state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock_root = fixed_local_path(
             state_root,
             LOCK_DIRECTORY_NAME,
             subject="Interprocess lock directory",
         )
-        state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock_root.mkdir(mode=0o700, exist_ok=True)
     except (OSError, RuntimeError, ValueError) as exc:
         raise RunbookError(f"Could not prepare interprocess lock for {target}: {exc}") from exc
@@ -182,11 +223,10 @@ def interprocess_lock(repo_root: Path, target: Path) -> Iterator[None]:
     lock_path = lock_file_path(repo_root, target)
     descriptor: int | None = None
     try:
-        open_flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            open_flags |= os.O_NOFOLLOW
+        open_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(lock_path, open_flags, 0o600)
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise OSError(errno.EINVAL, "lock path is not a regular file", str(lock_path))
         handle = os.fdopen(descriptor, "r+b", buffering=0)
         descriptor = None
@@ -198,13 +238,8 @@ def interprocess_lock(repo_root: Path, target: Path) -> Iterator[None]:
     locked = False
     body_failed = False
     try:
-        try:
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"\0")
-        except OSError as exc:
-            raise RunbookError(f"Could not initialize interprocess lock for {target}: {exc}") from exc
-
+        # Windows can lock the first byte of an empty file. Writing it before
+        # acquiring the lock races with another process that already owns it.
         deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
         while True:
             try:
@@ -266,6 +301,8 @@ def fixed_local_path(root: Path, name: str, *, subject: str) -> Path:
     try:
         resolved_root = root.resolve()
         expected = resolved_root / name
+        if expected.is_symlink() or expected.is_junction():
+            raise RunbookError(f"{subject} must not be a symbolic link or junction: {expected}")
         resolved = expected.resolve()
     except (OSError, RuntimeError) as exc:
         raise RunbookError(f"Could not resolve {subject.lower()}: {root / name}: {exc}") from exc
@@ -305,138 +342,6 @@ def path_runbook_id(relative_path: str) -> str:
     return f"path-{digest}"
 
 
-def content_hash(path: Path) -> str:
-    try:
-        content = path.read_bytes()
-    except OSError as exc:
-        raise RunbookError(f"Could not read runbook file: {path}") from exc
-    return hashlib.sha256(content).hexdigest()
-
-
-def legacy_session_filename(runbook_id: str) -> str:
-    if len(runbook_id) <= MAX_DIRECT_SESSION_ID_LENGTH:
-        return f"{runbook_id}.json"
-    digest = hashlib.sha256(runbook_id.encode("utf-8")).hexdigest()
-    return f"id-{digest}.json"
-
-
-def session_filename(runbook_id: str) -> str:
-    direct_name = f"{runbook_id}.json"
-    if (
-        len(runbook_id) <= MAX_DIRECT_SESSION_ID_LENGTH
-        and not LEGACY_HASH_FILENAME_ID_PATTERN.fullmatch(runbook_id)
-        and not ntpath.isreserved(direct_name)
-    ):
-        return direct_name
-    if len(runbook_id) > MAX_DIRECT_SESSION_ID_LENGTH:
-        return legacy_session_filename(runbook_id)
-    digest = hashlib.sha256(runbook_id.encode("utf-8")).hexdigest()
-    return f"_id-{digest}.json"
-
-
-def session_path(repo_root: Path, runbook_id: str) -> Path:
-    if not ID_PATTERN.fullmatch(runbook_id):
-        raise RunbookError(f"Invalid runbook id for session state: {runbook_id}")
-    state_root = fixed_local_path(
-        repo_root,
-        ".runbooks",
-        subject="Session state directory",
-    )
-    return fixed_local_path(
-        state_root,
-        session_filename(runbook_id),
-        subject="Runbook session file",
-    )
-
-
-def legacy_session_path(repo_root: Path, runbook_id: str) -> Path:
-    if not ID_PATTERN.fullmatch(runbook_id):
-        raise RunbookError(f"Invalid runbook id for session state: {runbook_id}")
-    state_root = fixed_local_path(
-        repo_root,
-        ".runbooks",
-        subject="Session state directory",
-    )
-    return fixed_local_path(
-        state_root,
-        legacy_session_filename(runbook_id),
-        subject="Legacy runbook session file",
-    )
-
-
-def migrate_legacy_session(canonical: Path, legacy: Path, runbook_id: str) -> None:
-    if canonical == legacy or not legacy.exists():
-        return
-    legacy_state = read_json(legacy)
-    if legacy_state.get("runbookId") != runbook_id:
-        return
-    version = legacy_state.get("schemaVersion")
-    if type(version) is not int or version != SESSION_SCHEMA_VERSION:
-        raise RunbookError(f"Unsupported session schema in {legacy}")
-    if canonical.exists():
-        raise RunbookError(
-            f"Both legacy and current session files exist for {runbook_id}: "
-            f"{legacy} and {canonical}"
-        )
-    try:
-        replace_with_retry(legacy, canonical)
-    except OSError as exc:
-        raise RunbookError(
-            f"Could not migrate legacy session file for {runbook_id}: {legacy}"
-        ) from exc
-
-
-@contextmanager
-def session_locks(
-    repo_root: Path,
-    runbook_ids: list[str],
-    *,
-    validate_candidate: Callable[[Path, object], None] | None = None,
-    before_migration: Callable[[Path, str], None] | None = None,
-) -> Iterator[dict[str, Path]]:
-    unique_ids = list(dict.fromkeys(runbook_ids))
-    canonical_paths = {
-        runbook_id: session_path(repo_root, runbook_id) for runbook_id in unique_ids
-    }
-    legacy_paths = {
-        runbook_id: legacy_session_path(repo_root, runbook_id) for runbook_id in unique_ids
-    }
-    lock_targets = sorted(
-        {*canonical_paths.values(), *legacy_paths.values()},
-        key=lambda candidate: os.path.normcase(str(candidate)),
-    )
-    with ExitStack() as locks:
-        for lock_target in lock_targets:
-            locks.enter_context(interprocess_lock(repo_root, lock_target))
-        if validate_candidate or before_migration:
-            candidates = dict.fromkeys(
-                [*canonical_paths.values(), *legacy_paths.values()]
-            )
-            for candidate in candidates:
-                if not candidate.exists():
-                    continue
-                stored_id = read_json(candidate).get("runbookId")
-                if validate_candidate:
-                    validate_candidate(candidate, stored_id)
-                if stored_id in unique_ids and before_migration:
-                    before_migration(candidate, stored_id)
-        for runbook_id in unique_ids:
-            migrate_legacy_session(
-                canonical_paths[runbook_id],
-                legacy_paths[runbook_id],
-                runbook_id,
-            )
-        yield canonical_paths
-
-
-def write_state(path: Path, state: dict[str, Any]) -> None:
-    write_json_atomic(path, state, default_mode=0o600)
-
-
-def state_payload(path: Path, state: dict[str, Any]) -> dict[str, Any]:
-    return {**state, "statePath": str(path)}
-
-
 def print_json(payload: Any) -> None:
     print(serialize_json(payload, subject="JSON output"))
 
@@ -446,10 +351,3 @@ def configure_standard_streams() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):
             reconfigure(encoding="utf-8", errors=errors)
-
-
-def require_nonempty(value: str, field: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise RunbookError(f"{field} must not be empty")
-    return normalized

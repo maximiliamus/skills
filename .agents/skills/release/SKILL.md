@@ -29,9 +29,9 @@ Before taking release action, load these sources completely:
 4. `skills/commit-bulk-changes/SKILL.md`.
 
 Follow the referenced release process in order. Treat every preflight,
-validation, identity, commit, tag, push, and verification condition as a hard
-gate. Preserve its stop conditions; a release request does not authorize
-retries or cleanup after a failed external mutation.
+change-set review, cleanup, validation, identity, commit, tag, push, and
+verification condition as a hard gate. Preserve its stop conditions; a release
+request does not authorize retries or cleanup after a failed external mutation.
 
 ## Report
 

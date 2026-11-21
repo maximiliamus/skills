@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_SKILL_NAMES = [
     "commit-bulk-changes",
+    "conduct-paired-review",
     "execute-guided-runbook",
 ]
 INTERNAL_SKILL_NAMES = [
@@ -40,7 +41,12 @@ def test_skills_exist():
         assert (internal_skills_dir / skill_name / "SKILL.md").is_file()
         assert (internal_skills_dir / skill_name / "agents" / "openai.yaml").is_file()
     assert (skills_dir / "commit-bulk-changes" / "README.md").is_file()
+    assert (skills_dir / "conduct-paired-review" / "README.md").is_file()
     assert (skills_dir / "execute-guided-runbook" / "README.md").is_file()
+    for name in ("conduct-paired-review", "execute-guided-runbook"):
+        config = json.loads((skills_dir / name / "config.json").read_text(encoding="utf-8"))
+        assert type(config["schemaVersion"]) is int
+        assert "createdWithVersion" not in config
     assert (
         internal_skills_dir
         / "bump-version"
@@ -58,7 +64,7 @@ def test_skills_exist():
     assert (runbook_scripts / "runbook_session.py").is_file()
     runtime_package = runbook_scripts / "execute_guided_runbook_lib"
     assert not (runbook_scripts / "lib").exists()
-    for module_name in ["cli.py", "model.py", "registry.py", "state.py", "storage.py"]:
+    for module_name in ["cli.py", "journal.py", "model.py", "registry.py", "storage.py"]:
         assert (runtime_package / module_name).is_file()
     assert (
         skills_dir / "execute-guided-runbook" / "references" / "runbook-registry.schema.json"

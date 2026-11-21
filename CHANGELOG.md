@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Use `conduct-paired-review` to review proposals, plans, and existing
+  functionality with two models. Turn their findings and disagreements into
+  agreed revisions or an improvement plan, and retain the review history.
+- Store settings for paired review and guided runbooks per project. Updates
+  preserve those settings and ongoing work.
+- Write simple sequential runbooks as Markdown headings or numbered steps.
+  Run independent steps in parallel, pause once active work has settled, and
+  resume with verified results and the original step order.
+- See which steps passed, failed, were skipped, ran out of attempts, or need
+  reassessment. Finish an audit with a verified report of unchecked sections
+  when preparation runs out of attempts and the procedure allows those gaps.
+- Continue existing v4 runs under their saved rules. Use older journals as
+  reference and start fresh when that work is still needed. See the
+  [upgrade instructions](./skills/execute-guided-runbook/README.md#upgrade).
+
 ## [0.3.1] - 2026-09-25
 
 - Include commit bodies for substantive changes by default in
@@ -30,10 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   safe session identity migration, and explicit archive pruning.
 - Keep the runbook helper dependency-free with a strict minimal parser for the
   supported frontmatter properties.
-- Add repository-local skills for deterministic version bumps and guarded
-  releases.
-- Move release guidance into the internal release skill, align it with the
-  repository's `master` branch, and require post-bump validation.
 
 ## [0.1.0] - 2026-08-30
 

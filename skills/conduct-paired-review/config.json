@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "participants": {
+    "codex": {
+      "runtime": "codex",
+      "modelFamily": "current",
+      "modelTier": "heavy",
+      "effortLevel": "high"
+    },
+    "claude": {
+      "runtime": "claude",
+      "modelFamily": "frontier",
+      "modelTier": "heavy",
+      "effortLevel": "high"
+    },
+    "antigravity": {
+      "runtime": "antigravity",
+      "modelFamily": "family:gemini",
+      "modelTier": "heavy",
+      "effortLevel": "high"
+    }
+  },
+  "defaultRoles": {
+    "author": "codex",
+    "critic": "claude"
+  },
+  "maxStagnantTurns": 4
+}

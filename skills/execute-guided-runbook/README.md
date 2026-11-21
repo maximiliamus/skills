@@ -1,134 +1,130 @@
 # Execute Guided Runbook
 
-`execute-guided-runbook` carries out Markdown runbooks as resumable, verified
-workflows. It exposes one unresolved step at a time and records progress in a
-local `.runbooks/` ledger, allowing a later turn or agent session to continue
-from saved evidence.
+Execute a Markdown repository procedure with independent step workers and a
+durable local journal. The coordinator schedules through the current harness
+and records results after verification. The helper persists completion, pause
+and recovery decisions.
 
-Execution records and enforces a concrete model until the operator explicitly
-changes it. Model-family values are `current` (the default), `frontier`, `predecessor`,
-`family:<version>`, and `exact:<model-id>`. They constrain model selection
-independently of the semantic `modelTier` and `effortLevel`; there is no fixed
-provider/model table.
+## Project configuration
 
-Set execution defaults in the Markdown runbook's frontmatter:
+Invoke the skill with `init` to create the project-owned
+`execute-guided-runbook.json`, or with `update` to validate the current file.
+Use `list`, `register ID PATH` and `unregister ID` to manage discovery. A
+repository-relative Markdown path can also select a runbook. Registry IDs and
+paths that identify the same runbook share an open run.
 
-```yaml
----
-modelTier: heavy
-effortLevel: high
-modelFamily: frontier
----
+The helper keeps journals, staging and the repository lock under `.runbooks`.
+Keep the discovery registry at the repository root. See the
+[registry schema](references/runbook-registry.schema.json).
+
+## Author a runbook
+
+### Simple sequential steps
+
+Use clear Markdown headings or an ordered list to describe the steps in
+execution order. With no step markers, one slot, and no dependency graph,
+the coordinator identifies the complete sequence once and supplies it at
+reservation. Start fails when the document lacks an unambiguous sequence.
+
+```markdown
+# Verify delivery
+
+## 1. Check inputs
+
+Verify the selected inputs and record evidence.
+
+## 2. Record findings
+
+Write a summary from the verified inputs.
 ```
 
-Omitted properties default to `medium`, `medium`, and `current` respectively.
-Registration records the runbook's location and discovery metadata. It does not
-accept or store these three execution properties in `runbooks.json`.
+### Marked steps
 
-## How It Works
+Declare steps with standalone `<!-- step: <id> -->` markers at the top
+level, immediately before ATX headings. Use stable lowercase kebab-case
+IDs. A step extends to the next step marker or the end of the document.
+Preamble and unmarked headings can contain shared or step-local
+instructions. Markers inside code, quotes and list items are examples or
+content. The helper rejects duplicate IDs and malformed markers.
 
-Runbooks can be selected by an ID from a repository-level `runbooks.json`
-registry. When no registry exists, a repository-relative Markdown path can be
-used instead. The skill supports listing and managing registered runbooks,
-starting or resuming a session, recording completed or blocked steps, skipping
-steps when permitted, and finishing a fully verified runbook.
+```markdown
+# Verify delivery
 
-Step completion records that a check was performed, not necessarily that its
-criterion passed. Workflow status (`active` or `completed`) is separate from
-assessment result (`PASSED`, `ACCEPTED`, `PARTIAL`, or `REJECTED`). Explicit
-operator acceptance can complete a deficient result without turning the
-deficiency into a pass.
+<!-- step: check -->
+## Check inputs
 
-Runbooks can declare a stable `id`, a discovery `description`,
-`acceptancePolicy` (`strict`, `flexible`, or `always`), and `stepOrder`
-(`sequential` or `arbitrary`) in Markdown frontmatter. Flexible policy may also
-declare an `acceptanceThreshold` such as `80%`; without a threshold, an
-incomplete score requires an operator decision. Defaults are `flexible`,
-`sequential`, and no automatic threshold.
+Verify the selected inputs and record evidence.
 
-The helper deliberately parses only flat `key: value` string properties. Values
-may be unquoted, single-quoted, or JSON-style double-quoted. `description` alone
-also accepts a literal `description: |` block with space-indented content.
-Nested mappings, sequences, other multiline forms, anchors, and tags are
-rejected; no external YAML library is required.
+<!-- step: report -->
+## Record findings
 
-Ordering is independent from acceptance. Arbitrary-order execution retains one
-current ledger step while allowing any actionable step to be selected. The
-`step --retry` command revisits a previously assessed step without deleting its
-earlier evidence, and attempt numbers preserve the full progression.
+Write the report from the current check assessment.
 
-Every new session records structured per-step results and natural scores. The
-final command names every expected step, ensuring that `always` acceptance and
-operator decisions cannot hide an unevaluated step. Percentages are derived by
-the helper and exact halves round upward.
-
-Registering a path that already has an unregistered session preserves its
-recorded progress under the new registered ID. Adding a frontmatter `id` to an
-unregistered runbook performs the same safe migration and then invokes the
-normal changed-revision decision gate.
-
-Document frontmatter is the live source for `description` unless registration
-explicitly supplies an override. Existing registry descriptions remain
-overrides for compatibility.
-
-If a runbook changes during an unfinished session, the skill pauses for an
-explicit choice between continuing with saved progress and archiving it to
-start over. External mutations such as pushing, tagging, publishing, or merging
-still require explicit authorization.
-
-Archived ledgers are stored under `.runbooks/archive/` and retained
-indefinitely by default. The skill never removes evidence during ordinary
-execution. Use the explicit `prune` command to preview or remove archives for
-one runbook by age or by the number of newest snapshots to keep.
-
-## Usage
-
-The dependency-free helper requires Python 3.14 or newer.
-
-Model selection is agent-agnostic. The executing agent maps the runbook's
-semantic profile to its own available models and session capabilities. The
-skill contains no provider, scheduler, API, or model catalog integration. The
-helper records the selected `modelId` and requires that same actual current
-model ID on every progress command.
-Read the [agent-agnostic execution contract](./references/model-execution.md)
-for dynamic resolution and failure behavior.
-
-When the current model does not satisfy the runbook selection, execution stops
-until the operator decides what to do. After the operator explicitly approves
-running on the selected model, the initiating agent uses its runtime's native
-model-session or delegation facility to start that model context. Where the
-runtime supports it, the initiating agent stays in the current conversation
-and proxies the target context's questions, operator answers, evidence, and
-results. The target context proves its own model identity and is the only
-context that creates or resumes the ledger. This handoff contract does not add
-an agent-specific integration to the skill.
-
-`run` records `modelFamily`, `modelId`, tier and effort in the local ledger.
-Resume and every step mutation compare `--model-id` with the recorded ID;
-mismatches stop without creating another session. After an explicit operator
-instruction, `rebind --model-family <family> --model-id <actual-current-model>`
-updates the same ledger and preserves its current step, history, decisions,
-tier, effort, and runbook revision. Registry updates and path migrations
-preserve the binding. `list` reads current document defaults, while `status`
-displays recorded values from any session.
-
-Registry and ledger schemas are version 2. Version 1 files are rejected without
-automatic migration or invented model evidence. Execution properties in the
-registry are rejected; put them in Markdown frontmatter. For a new session, an
-explicit operator request can override `modelFamily` using `run
---model-family <family>`. The helper records `modelFamily`, `modelId`,
-`modelTier`, and `effortLevel`.
-Existing sessions retain their binding after restart, revision decisions, and
-document edits unless the operator explicitly invokes `rebind`. Starting from
-the first step is reserved for an explicit operator instruction: use
-`--restart` for the same revision or `--ignore` after a changed-revision prompt.
-
-Invoke the skill with a request such as:
-
-```text
-Use $execute-guided-runbook to run the release runbook.
+<!-- deliverable: reports/{runId}/report.md -->
 ```
 
-See [SKILL.md](./SKILL.md) for the complete agent instructions and the
-[runbook registry schema](./references/runbook-registry.schema.json) for the
-optional registry format.
+### Execution settings
+
+| Frontmatter property | Default | Behavior |
+| --- | --- | --- |
+| `maxParallelSteps` | `1` | Concurrent live attempt limit. |
+| `maxAttempts` | `1` | Attempt budget per step, including the first. |
+| `delegateSteps` | `false` | With `true`, each attempt needs a fresh worker. |
+| `stepOrder` | `sequential` | Selection order in a single-slot runbook. |
+| `steps` | Empty mapping | Dependencies and overrides by step ID. |
+| `modelFamily` | `current` | Model selector. |
+| `modelTier` | `medium` | `light`, `medium` or `heavy`. |
+| `effortLevel` | `medium` | `low`, `medium`, `high` or `extra`. |
+| `acceptancePolicy` | `flexible` | Also supports `strict` and `always`. |
+| `acceptanceThreshold` | Unset | `1%` through `100%` for `flexible`. |
+
+Both limits must be positive integers. The attempt budget carries across
+invocations. With one slot, `sequential` and no explicit dependencies, the
+helper follows Markdown order for both ways of declaring steps. It waits for
+the first step without a current terminal outcome, including a step parked
+on an answer or out of attempts.
+
+Use `dependsOn` to express a graph, including steps that require another step
+to succeed. Every listed prerequisite must hold. `passed` requires a current
+`PASSED` outcome. `done` accepts any current terminal outcome. The helper also
+accepts the older spelling `assessed` when reading Markdown. It rejects
+unknown IDs, unsupported conditions, self-dependencies and cycles. In a
+single-slot graph, `sequential` picks the first ready step in declaration
+order. `arbitrary` or multiple slots allow any ready step. With multiple slots,
+declare dependencies for preparation, reporting and other ordered work
+explicitly.
+
+Per-step settings can override `modelFamily`, `modelTier`, `effortLevel`,
+`delegateSteps` and `maxAttempts`.
+
+Use top-level `<!-- deliverable: <path> -->` markers after the owning step's
+heading. Deliverable paths are repository-relative and can include `{runId}`.
+See the [execution contract](references/journal-contract.md) for model
+selection, output publication, recovery and assessment.
+
+## Upgrade
+
+New runs use journal v5. The current helper can read and continue v4 runs
+with their existing graph, ordering rules, outcomes and history. The same
+registered ID or path still identifies an open v4 run. Use the current helper
+in every coordinator sharing the repository before reserving a v5 run. Older
+helpers cannot discover or continue v5 journals.
+
+For work from before v4 that is still needed, stop any earlier execution and
+reconcile its effects. Reserve a fresh run with the current procedure and
+zero progress. Keep earlier journals and archives at their existing paths
+as reference files.
+
+## Run, pause and resume
+
+Choose ready independent steps and use native workers in parallel when the
+procedure and harness allow it. After verifying the result and required files,
+the coordinator records `done`. To pause, it stops handing off steps and waits
+for the already handed-off workers and their commands to finish. If the harness
+cannot confirm whether a worker or command ended, the run stays `pausing`.
+
+Resume from the journal's frozen procedure. Preserve applicable completed work
+and retry safe unfinished steps within the recorded budget. When a new
+coordinator takes over, it records evidence that its predecessor can no
+longer issue work. Questions, outstanding effects and unresolved publication
+intents remain visible for reconciliation.

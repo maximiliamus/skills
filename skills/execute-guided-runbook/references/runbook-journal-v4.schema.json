@@ -1,0 +1,461 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Guided runbook journal v4",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 4
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+    },
+    "runbook": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "contract": {
+      "$ref": "#/$defs/contract"
+    },
+    "events": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runId",
+    "runbook",
+    "contract",
+    "events"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "contract": {
+      "type": "object",
+      "properties": {
+        "instructions": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maxParallelSteps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "delegateSteps": {
+          "type": "boolean"
+        },
+        "stepOrder": {
+          "enum": [
+            "sequential",
+            "arbitrary"
+          ]
+        },
+        "acceptancePolicy": {
+          "enum": [
+            "strict",
+            "flexible",
+            "always"
+          ]
+        },
+        "acceptanceThreshold": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^(?:[1-9]|[1-9][0-9]|100)%$"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        }
+      },
+      "required": [
+        "instructions",
+        "maxParallelSteps",
+        "delegateSteps",
+        "stepOrder",
+        "acceptancePolicy",
+        "acceptanceThreshold",
+        "steps"
+      ],
+      "additionalProperties": false
+    },
+    "step": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instruction": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "startLine": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "endLine": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "path",
+            "sha256",
+            "startLine",
+            "endLine"
+          ],
+          "additionalProperties": false
+        },
+        "deliverables": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "dependsOn": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": [
+              "passed",
+              "assessed"
+            ]
+          }
+        },
+        "modelFamily": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modelFamilyOrigin": {
+          "enum": [
+            "default",
+            "runbook",
+            "operator",
+            "step"
+          ]
+        },
+        "modelTier": {
+          "enum": [
+            "light",
+            "medium",
+            "heavy"
+          ]
+        },
+        "effortLevel": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "extra"
+          ]
+        },
+        "explicitTier": {
+          "type": "boolean"
+        },
+        "explicitEffort": {
+          "type": "boolean"
+        },
+        "delegateSteps": {
+          "type": "boolean"
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "points": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "procedure": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "section": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "path",
+              "sha256",
+              "section"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "gapCauses": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "failed-prerequisite",
+              "exhausted",
+              "invalidated"
+            ]
+          }
+        },
+        "reuse": {
+          "type": "boolean"
+        },
+        "reassessAfterInvalidation": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "instruction",
+        "deliverables",
+        "dependsOn",
+        "modelFamily",
+        "modelFamilyOrigin",
+        "modelTier",
+        "effortLevel",
+        "explicitTier",
+        "explicitEffort",
+        "delegateSteps",
+        "maxAttempts",
+        "points",
+        "procedure",
+        "gapCauses",
+        "reuse",
+        "reassessAfterInvalidation"
+      ],
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "type": {
+          "enum": [
+            "reserve",
+            "takeover",
+            "admit",
+            "observe",
+            "resolve",
+            "set-pause",
+            "invalidate",
+            "assess",
+            "override",
+            "close",
+            "publication-intent"
+          ]
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "seq",
+        "at",
+        "requestId",
+        "requestDigest",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "reserve",
+                  "takeover"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "required": [
+                  "ownershipToken"
+                ],
+                "properties": {
+                  "ownershipToken": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{43}$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "publication-intent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/publicationIntent"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "publicationIntent": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "enum": [
+            "observe",
+            "assess"
+          ]
+        },
+        "eventData": {
+          "type": "object",
+          "required": [
+            "stepId",
+            "assessment"
+          ]
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/deliverable"
+          }
+        }
+      },
+      "required": [
+        "operation",
+        "eventData",
+        "requestId",
+        "requestDigest",
+        "artifacts"
+      ],
+      "additionalProperties": false
+    },
+    "deliverable": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stagedPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "priorSha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replacement": {
+          "type": "object",
+          "properties": {
+            "statement": {
+              "type": "string",
+              "minLength": 1
+            },
+            "reference": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "statement",
+            "reference"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "path",
+        "stagedPath",
+        "sha256",
+        "priorSha256"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

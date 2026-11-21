@@ -24,19 +24,12 @@ from .model import (
     valid_acceptance_threshold,
 )
 from .model_binding import DEFAULT_MODEL_FAMILY, normalize_model_family
-from .state import read_state, sync_state_metadata
 from .storage import (
     inside_repo,
     path_runbook_id,
-    print_json,
-    read_json,
     read_runbook_text,
-    require_nonempty,
-    session_locks,
-    utc_now,
-    write_json_atomic,
-    write_state,
 )
+from .validation import RequestError
 
 
 def normalize_registry_path(
@@ -67,24 +60,24 @@ def validate_registered_id(runbook_id: str) -> None:
     if not ID_PATTERN.fullmatch(runbook_id):
         raise RunbookError(f"Invalid runbook id: {runbook_id}")
     if GENERATED_PATH_ID_PATTERN.fullmatch(runbook_id):
-        raise RunbookError(
-            f"Runbook id uses the reserved path-session namespace: {runbook_id}"
-        )
+        raise RunbookError(f"Runbook id uses the reserved path-session namespace: {runbook_id}")
 
 
-def load_registry(path: Path, repo_root: Path) -> dict[str, dict[str, Any]]:
-    if not path.exists():
-        return {}
-    if not path.is_file():
-        raise RunbookError(f"Runbook registry must be a regular file: {path}")
-    data = read_json(path)
-    unknown_top_level = set(data) - {"schemaVersion", "runbooks"}
+def validate_registry(
+    data: dict[str, Any],
+    path: Path,
+    repo_root: Path,
+) -> dict[str, dict[str, Any]]:
+    """Validate a project config or a template without publishing it."""
+    unknown_top_level = set(data) - {"schemaVersion", "runbooks", "stateDirectory"}
     if unknown_top_level:
         fields = ", ".join(sorted(unknown_top_level))
         raise RunbookError(f"Unknown registry field(s) in {path}: {fields}")
     version = data.get("schemaVersion")
     if type(version) is not int or version != REGISTRY_SCHEMA_VERSION:
-        raise RunbookError(f"Unsupported runbook registry schema in {path}")
+        raise RequestError(f"Unsupported runbook registry schema in {path}", "UNSUPPORTED_SCHEMA")
+    if data.get("stateDirectory", ".runbooks") != ".runbooks":
+        raise RunbookError(f"Runbook state must live in .runbooks: {path}")
 
     entries = data.get("runbooks")
     if not isinstance(entries, list):
@@ -145,30 +138,20 @@ def public_registry_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in entry.items() if not key.startswith("_")}
 
 
-def persisted_registry_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    persisted = public_registry_entry(entry)
-    if not entry.get("_descriptionOverride", False):
-        persisted.pop("description", None)
-    return persisted
-
-
-def write_registry(path: Path, registry: dict[str, dict[str, Any]]) -> None:
-    payload = {
-        "schemaVersion": REGISTRY_SCHEMA_VERSION,
-        "runbooks": [
-            persisted_registry_entry(registry[runbook_id])
-            for runbook_id in sorted(registry)
-        ],
-    }
-    write_json_atomic(path, payload, default_mode=0o666)
-
-
 def resolve_runbook(
     selector: str,
     repo_root: Path,
     registry: dict[str, dict[str, Any]],
-    registry_enabled: bool,
 ) -> dict[str, Any]:
+    if selector not in registry and Path(selector).suffix.lower() == ".md":
+        _, _, selected_path = normalize_registry_path(selector, repo_root)
+        matches = sorted(
+            key
+            for key, entry in registry.items()
+            if inside_repo(repo_root, repo_root / entry["path"]) == selected_path
+        )
+        if matches:
+            selector = matches[0]
     if selector in registry:
         entry = registry[selector]
         runbook_path = inside_repo(repo_root, repo_root / entry["path"])
@@ -181,8 +164,8 @@ def resolve_runbook(
             "_descriptionOverride": entry.get("_descriptionOverride", False),
             "registered": True,
         }
-    elif registry_enabled:
-        raise RunbookError(f"Runbook id is not registered: {selector}")
+    elif Path(selector).suffix.lower() != ".md":
+        raise RequestError(f"Runbook id is not registered: {selector}", "NOT_FOUND")
     else:
         raw_path = Path(selector)
         candidate = raw_path if raw_path.is_absolute() else repo_root / raw_path
@@ -200,12 +183,20 @@ def resolve_runbook(
     if runbook_path.suffix.lower() != ".md":
         raise RunbookError(f"Runbook must be a Markdown file: {runbook_path}")
     if not runbook_path.is_file():
-        raise RunbookError(f"Runbook does not exist: {runbook_path}")
+        raise RequestError(f"Runbook does not exist: {runbook_path}", "NOT_FOUND")
     runbook_text = read_runbook_text(runbook_path)
     document_properties = runbook_document_properties(runbook_text, runbook_path)
     document_id = document_properties.pop("id", None)
     document_description = document_properties.pop("description", None)
     if document_id is not None:
+        if (
+            document_id in registry
+            and inside_repo(repo_root, repo_root / registry[document_id]["path"]) != runbook_path
+        ):
+            raise RunbookError(
+                f"Runbook frontmatter id {document_id!r} is already registered to a different path: "
+                f"{registry[document_id]['path']}"
+            )
         if result["registered"] and document_id != result["id"]:
             raise RunbookError(
                 f"Runbook frontmatter id {document_id!r} does not match registered id "
@@ -227,6 +218,11 @@ def runbook_document_properties(text: str, path: Path) -> dict[str, Any]:
         "acceptancePolicy": DEFAULT_ACCEPTANCE_POLICY,
         "stepOrder": DEFAULT_STEP_ORDER,
         "acceptanceThreshold": None,
+        "delegateSteps": False,
+        "maxParallelSteps": 1,
+        "maxAttempts": 1,
+        "steps": {},
+        "_explicitModelSettings": [],
     }
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -251,17 +247,21 @@ def runbook_document_properties(text: str, path: Path) -> dict[str, Any]:
         "acceptanceThreshold",
     }
     model_choices = {"effortLevel": EFFORT_LEVELS, "modelTier": MODEL_TIERS}
+    properties["_explicitModelSettings"] = [
+        key for key in ("modelFamily", "modelTier", "effortLevel") if key in document
+    ]
+    if "stepOverrides" in document:
+        raise RunbookError("Use steps for per-step settings")
     for key, value in document.items():
+        if key in {"delegateSteps", "maxParallelSteps", "maxAttempts", "steps"}:
+            properties[key] = value
+            continue
         if key not in supported:
             continue
         if key == "description" and value is None:
-            raise RunbookError(
-                f"Runbook frontmatter description must not be empty in {path}"
-            )
+            raise RunbookError(f"Runbook frontmatter description must not be empty in {path}")
         if not isinstance(value, str):
-            raise RunbookError(
-                f"Runbook frontmatter property {key} must be a string in {path}"
-            )
+            raise RunbookError(f"Runbook frontmatter property {key} must be a string in {path}")
         if key == "modelFamily":
             try:
                 value = normalize_model_family(value)
@@ -272,9 +272,7 @@ def runbook_document_properties(text: str, path: Path) -> dict[str, Any]:
         if key == "id":
             validate_registered_id(value)
         if key == "description" and not value:
-            raise RunbookError(
-                f"Runbook frontmatter description must not be empty in {path}"
-            )
+            raise RunbookError(f"Runbook frontmatter description must not be empty in {path}")
         if key in model_choices and value not in model_choices[key]:
             choices = ", ".join(sorted(model_choices[key]))
             raise RunbookError(
@@ -314,52 +312,93 @@ FRONTMATTER_KEY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 UNSUPPORTED_FRONTMATTER_VALUE_PREFIXES = ("[", "{", "|", ">", "&", "*", "!")
 
 
-def parse_runbook_frontmatter(lines: list[str], path: Path) -> dict[str, str]:
-    """Parse the deliberately small flat-scalar frontmatter contract."""
-    properties: dict[str, str] = {}
-    index = 0
+def parse_runbook_frontmatter(lines: list[str], path: Path) -> dict[str, Any]:
+    """Read scalars, multiline descriptions and the bounded steps mapping."""
+    return parse_mapping(lines, path, 0, 0, "document")[0]
+
+
+def parse_mapping(lines, path, index, indentation, level):
+    properties = {}
     while index < len(lines):
         line = lines[index]
         line_number = index + 2
         if not line.strip() or line.lstrip().startswith("#"):
             index += 1
             continue
-        if line != line.lstrip():
-            raise RunbookError(
-                f"Runbook frontmatter supports only unindented flat properties in {path} "
-                f"at line {line_number}"
-            )
+        current_indent = len(line) - len(line.lstrip(" "))
+        if current_indent < indentation:
+            break
+        if current_indent != indentation or line[current_indent:].startswith("\t"):
+            raise RunbookError(f"Unexpected frontmatter indentation in {path}:{line_number}")
+        line = line[indentation:]
         if ":" not in line:
             raise RunbookError(
-                f"Runbook frontmatter must contain flat key: value properties in {path} "
+                f"Runbook frontmatter must contain key: value properties in {path} "
                 f"at line {line_number}"
             )
         key, raw_value = line.split(":", 1)
         key = key.strip()
-        if not FRONTMATTER_KEY_PATTERN.fullmatch(key):
+        pattern = ID_PATTERN if level in {"steps", "dependsOn"} else FRONTMATTER_KEY_PATTERN
+        if not pattern.fullmatch(key):
             raise RunbookError(
-                f"Invalid runbook frontmatter property name {key!r} in {path} "
-                f"at line {line_number}"
+                f"Invalid runbook frontmatter property name {key!r} in {path} at line {line_number}"
             )
         if key in properties:
             raise RunbookError(f"Duplicate runbook frontmatter property {key} in {path}")
         raw_value = raw_value.strip()
+        mapping = (
+            (level == "document" and key == "steps")
+            or level == "steps"
+            or (level == "step" and key == "dependsOn")
+        )
+        if mapping:
+            if raw_value == "{}":
+                properties[key] = {}
+                index += 1
+                continue
+            if raw_value:
+                raise RunbookError(f"Expected a mapping for {key} in {path}:{line_number}")
+            child = next(
+                (
+                    i
+                    for i in range(index + 1, len(lines))
+                    if lines[i].strip() and not lines[i].lstrip().startswith("#")
+                ),
+                None,
+            )
+            child_indent = (
+                len(lines[child]) - len(lines[child].lstrip(" ")) if child is not None else 0
+            )
+            if child_indent <= indentation:
+                raise RunbookError(
+                    f"Expected an indented mapping for {key} in {path}:{line_number}"
+                )
+            child_level = {"document": "steps", "steps": "step", "step": "dependsOn"}[level]
+            properties[key], index = parse_mapping(lines, path, child, child_indent, child_level)
+            continue
         if raw_value == "|":
-            if key != "description":
+            if level != "document" or key != "description":
                 raise RunbookError(
                     f"Only runbook frontmatter description supports a multiline value "
                     f"in {path} at line {line_number}"
                 )
             properties[key], index = parse_multiline_description(lines, index + 1, path)
             continue
-        properties[key] = parse_frontmatter_scalar(raw_value, path, line_number)
+        if key == "delegateSteps" and level in {"document", "step"}:
+            if raw_value not in {"true", "false"}:
+                raise RunbookError(f"{key} must be a boolean in {path}:{line_number}")
+            properties[key] = raw_value == "true"
+        elif key in {"maxAttempts", "maxParallelSteps"} and level in {"document", "step"}:
+            if not re.fullmatch(r"[1-9][0-9]*", raw_value):
+                raise RunbookError(f"{key} must be a positive integer in {path}:{line_number}")
+            properties[key] = int(raw_value)
+        else:
+            properties[key] = parse_frontmatter_scalar(raw_value, path, line_number)
         index += 1
-    return properties
+    return properties, index
 
 
-def parse_multiline_description(
-    lines: list[str], start_index: int, path: Path
-) -> tuple[str, int]:
+def parse_multiline_description(lines: list[str], start_index: int, path: Path) -> tuple[str, int]:
     content: list[str] = []
     indentation: int | None = None
     index = start_index
@@ -373,8 +412,7 @@ def parse_multiline_description(
             break
         if line.startswith("\t"):
             raise RunbookError(
-                f"Multiline runbook description must use spaces in {path} "
-                f"at line {index + 2}"
+                f"Multiline runbook description must use spaces in {path} at line {index + 2}"
             )
         current_indentation = len(line) - len(line.lstrip(" "))
         if indentation is None:
@@ -394,7 +432,7 @@ def parse_multiline_description(
 def parse_frontmatter_scalar(raw_value: str, path: Path, line_number: int) -> str:
     if not raw_value:
         return ""
-    if raw_value.startswith("\""):
+    if raw_value.startswith('"'):
         try:
             value = json.loads(raw_value)
         except json.JSONDecodeError as exc:
@@ -404,8 +442,7 @@ def parse_frontmatter_scalar(raw_value: str, path: Path, line_number: int) -> st
             ) from exc
         if not isinstance(value, str):
             raise RunbookError(
-                f"Runbook frontmatter values must be strings in {path} "
-                f"at line {line_number}"
+                f"Runbook frontmatter values must be strings in {path} at line {line_number}"
             )
         return value
     if raw_value.startswith("'"):
@@ -438,22 +475,6 @@ def parse_frontmatter_scalar(raw_value: str, path: Path, line_number: int) -> st
     return raw_value
 
 
-def resolve_runbook_path(raw_path: str, repo_root: Path) -> tuple[Path, str]:
-    candidate_path = Path(raw_path)
-    candidate = candidate_path if candidate_path.is_absolute() else repo_root / candidate_path
-    runbook_path = inside_repo(repo_root, candidate)
-    if runbook_path.suffix.lower() != ".md":
-        raise RunbookError(f"Runbook must be a Markdown file: {runbook_path}")
-    if not runbook_path.is_file():
-        raise RunbookError(f"Runbook does not exist: {runbook_path}")
-    read_runbook_text(runbook_path)
-    relative_path = runbook_path.relative_to(repo_root.resolve()).as_posix()
-    portable_path, _, normalized_path = normalize_registry_path(relative_path, repo_root)
-    if normalized_path != runbook_path:
-        raise RunbookError(f"Runbook path cannot be stored portably: {relative_path!r}")
-    return runbook_path, portable_path
-
-
 def document_title(path: Path) -> str:
     for line in read_runbook_text(path).splitlines():
         if line.startswith("# "):
@@ -461,170 +482,3 @@ def document_title(path: Path) -> str:
             if title:
                 return title
     return path.stem.replace("-", " ").replace("_", " ").title()
-
-
-def command_list(
-    registry: dict[str, dict[str, Any]],
-    repo_root: Path | None = None,
-) -> None:
-    entries: list[dict[str, Any]] = []
-    for runbook_id in sorted(registry):
-        entry = registry[runbook_id]
-        if repo_root is not None:
-            resolved = resolve_runbook(runbook_id, repo_root, registry, True)
-            entry = {**entry, **{
-                key: resolved[key] for key in (
-                    "description", "effortLevel", "modelTier", "modelFamily",
-                )
-            }}
-        entries.append(public_registry_entry(entry))
-    print_json(
-        {
-            "schemaVersion": REGISTRY_SCHEMA_VERSION,
-            "runbooks": entries,
-        }
-    )
-
-
-def command_register(
-    registry_path: Path,
-    registry: dict[str, dict[str, Any]],
-    repo_root: Path,
-    runbook_id: str,
-    raw_path: str,
-    title: str | None,
-    description: str | None,
-) -> None:
-    validate_registered_id(runbook_id)
-    runbook_path, relative_path = resolve_runbook_path(raw_path, repo_root)
-    document_properties = runbook_document_properties(
-        read_runbook_text(runbook_path), runbook_path
-    )
-    document_id = document_properties.get("id")
-    if document_id is not None and document_id != runbook_id:
-        raise RunbookError(
-            f"Runbook frontmatter id {document_id!r} does not match registration id "
-            f"{runbook_id!r} in {runbook_path}"
-        )
-    existing = registry.get(runbook_id)
-    if title is not None:
-        resolved_title = require_nonempty(title, "Runbook title")
-    elif existing is not None:
-        resolved_title = existing["title"]
-    else:
-        resolved_title = document_title(runbook_path)
-
-    description_override = description is not None or bool(
-        existing and existing.get("_descriptionOverride", False)
-    )
-    if description is not None:
-        resolved_description = require_nonempty(description, "Runbook description")
-    elif existing is not None and existing.get("_descriptionOverride", False):
-        resolved_description = existing["description"]
-    elif document_properties.get("description") is not None:
-        resolved_description = document_properties["description"]
-    else:
-        resolved_description = f"Repository runbook: {resolved_title}."
-
-    entry = {
-        "id": runbook_id,
-        "title": resolved_title,
-        "path": relative_path,
-        "description": resolved_description,
-        "_descriptionOverride": description_override,
-    }
-    source_runbook_id = path_runbook_id(relative_path)
-    migration: dict[str, Any] | None = None
-    created_target_state = False
-
-    def validate_session_candidate(source: Path, candidate_id: object) -> None:
-        read_state(source, {"id": candidate_id})
-
-    with session_locks(
-        repo_root,
-        [source_runbook_id, runbook_id],
-        validate_candidate=validate_session_candidate,
-    ) as state_paths:
-        source_state_path = state_paths[source_runbook_id]
-        target_state_path = state_paths[runbook_id]
-
-        if source_state_path != target_state_path and source_state_path.exists():
-            if target_state_path.exists():
-                raise RunbookError(
-                    "Cannot register runbook while both its path-based and registered "
-                    f"sessions exist: {source_state_path} and {target_state_path}"
-                )
-            state = read_state(source_state_path, {"id": source_runbook_id})
-            state["runbookId"] = runbook_id
-            sync_state_metadata(
-                state,
-                {
-                    "title": entry["title"],
-                    "relativePath": entry["path"],
-                    "registered": True,
-                    "acceptancePolicy": document_properties["acceptancePolicy"],
-                    "stepOrder": document_properties["stepOrder"],
-                    "acceptanceThreshold": document_properties["acceptanceThreshold"],
-                },
-            )
-            state["updatedAt"] = utc_now()
-            write_state(target_state_path, state)
-            created_target_state = True
-            migration = {
-                "fromRunbookId": source_runbook_id,
-                "toRunbookId": runbook_id,
-                "fromStatePath": str(source_state_path),
-                "toStatePath": str(target_state_path),
-            }
-
-        registry[runbook_id] = entry
-        try:
-            write_registry(registry_path, registry)
-        except RunbookError:
-            if created_target_state:
-                try:
-                    target_state_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            raise
-
-        if migration is not None:
-            try:
-                source_state_path.unlink()
-            except OSError as exc:
-                migration["sourceStateRetained"] = True
-                migration["cleanupWarning"] = str(exc)
-            else:
-                migration["sourceStateRetained"] = False
-
-    print_json(
-        {
-            "registered": {
-                **public_registry_entry(registry[runbook_id]),
-                **{key: document_properties[key] for key in (
-                    "effortLevel", "modelTier", "modelFamily",
-                )},
-            },
-            "registryPath": str(registry_path),
-            "sessionMigration": migration,
-        }
-    )
-
-
-def command_unregister(
-    registry_path: Path,
-    registry: dict[str, dict[str, Any]],
-    runbook_id: str,
-) -> None:
-    if runbook_id not in registry:
-        raise RunbookError(f"Runbook id is not registered: {runbook_id}")
-    removed = public_registry_entry(registry.pop(runbook_id))
-    write_registry(registry_path, registry)
-    print_json(
-        {
-            "unregistered": removed,
-            "registryPath": str(registry_path),
-            "runbookDeleted": False,
-            "sessionDeleted": False,
-        }
-    )

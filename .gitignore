@@ -12,6 +12,10 @@ htmlcov/
 # Local runbook execution state
 /.runbooks/
 
+# Local consumer settings in the skill development repository
+/conduct-paired-review.json
+/execute-guided-runbook.json
+
 # Environments
 .venv/
 venv/

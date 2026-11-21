@@ -2,17 +2,41 @@
 
 ## Scope and validation
 
-- Treat `skills/` as the distributable skill collection. Repository-local
-  agent configuration such as this file is development infrastructure, not a
-  published skill.
+- The skill collection lives in `skills/`.
 - Use Python 3.14 for routine development and validation.
 - After code changes, run `python -m pytest` and `python -m ruff check`. After Markdown
   changes, also run `npx --yes markdownlint-cli2 "**/*.md"`.
 - Preserve unrelated staged, unstaged, and untracked user changes.
-- Keep `CHANGELOG.md` at the level of user-visible product behavior. Low-level
-  implementation details do not belong in changelog entries. Omit internal
-  design choices, refactors, tests, release mechanics, and versioning policy,
-  and validate every added or edited entry against this rule before committing.
+
+## Changelog
+
+- Write entries in English and describe the added or changed value for users:
+  what they can now accomplish, what problem is solved, or what work is preserved.
+- Describe final capabilities and group related changes by user outcome.
+  Do not turn the changelog into a development log or list intermediate fixes
+  made while building an unreleased feature.
+- Keep usage instructions and technical details in skill documentation.
+  Do not enumerate CLI commands, arguments, paths, configuration fields or
+  dialogue mechanics. Omit internal design choices, refactors, tests, release
+  mechanics and versioning policy. Explain any necessary upgrade impact in
+  user terms and link to the upgrade instructions.
+- Review every added or edited entry against these rules before committing,
+  including entries promoted from `Unreleased` or derived from commit messages.
+
+## Skill lifecycle commands
+
+- Apply the `init` and `update` command convention only in `skills/`.
+  Handle these commands before the skill's main workflow. Run the applicable
+  setup or update actions, including external configuration management where
+  supported, then finish the request.
+- If the skill has no actions for the requested command, reply only
+  `nothing to do`. Do not create files or execute its main workflow.
+
+## Releases
+
+- Before every release, invoke and execute [`$release`](.agents/skills/release/SKILL.md).
+  Complete every required step and verification gate. Respect its authorization
+  boundaries and stop conditions. A failed gate stops the release.
 
 ## Code review rules
 
@@ -47,14 +71,15 @@ separately asks for fixes.
 - Helper code must not expose generic top-level import names such as `lib` or `utils`.
   Preserve both direct CLI execution and in-process imports when changing the runbook
   helper package.
-- Registry and session-state mutations must remain atomic under repository-local
+- Runbook registry and session-state mutations must remain atomic under repository-local
   locks stored inside `.runbooks`. Keep session state and lock files inside that
-  directory; keep the committed registry at repository-root `runbooks.json`.
+  directory; keep the committed registry at repository-root
+  `execute-guided-runbook.json`.
   Preserve required permissions and reject symlink or junction redirection.
-- Treat the `runbook_session.py` CLI, its JSON output, the registry schema, and
-  persisted session files as compatibility surfaces. Changes require coverage
-  for existing ledgers, completed and outdated sessions, and registered or
-  migrated runbook paths.
+- Preserve the `runbook_session.py` CLI, its JSON output, the registry schema,
+  and journals in the current format. Cover active and completed runs, changes
+  to a procedure, and registered or moved paths when changing these surfaces.
+  Procedures from earlier versions start a fresh run if needed.
 - Keep generic mechanical checks in tests or tooling. Add review guidance here
   only for consequential, non-obvious invariants that automation does not
   already enforce.

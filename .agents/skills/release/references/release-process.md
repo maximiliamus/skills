@@ -4,13 +4,34 @@ This reference is the source of truth for releasing the
 `maximiliamus/skills` repository. Follow the phases in order and stop at the
 first failed gate.
 
+## Prepare The Change Set
+
+1. Review all staged, unstaged and untracked changes. Resolve blocking findings
+   and establish which files belong to the release. Preserve unrelated work.
+2. Review the proposed changelog entries against the repository rules. Describe
+   the final user-visible behavior and necessary upgrade actions. Remove internal
+   implementation details and intermediate development history; label defaults
+   and configurable limits accurately, and distinguish registries from the
+   documents they reference.
+3. Remove temporary projects, test sessions, probe files and logs created for
+   this work. Verify ownership and exact paths before cleanup; preserve real
+   sessions and unrelated artifacts. Tests must keep their state inside isolated
+   temporary projects and clean up their generated artifacts after validation.
+4. Keep bundled `skills/*/config.json` templates in the release. Project-owned
+   `conduct-paired-review.json` and `execute-guided-runbook.json` in this
+   development repository are local consumer settings, not release files.
+5. Commit the reviewed product changes before entering preflight, using
+   `skills/commit-bulk-changes/SKILL.md` and only within the operator-authorized
+   scope. A request to prepare a release alone does not authorize these commits.
+   Keep product changes separate from the version/changelog release commit.
+
 ## Preflight
 
 1. Require `[project].name = "maximiliamus-skills"` and require the `origin`
    fetch and push URLs to identify `maximiliamus/skills`. Stop before any
    external action when repository identity is ambiguous.
 2. Require the repository root, current branch `master`, an existing `HEAD`,
-   and a completely clean staged and unstaged worktree.
+   and a completely clean staged, unstaged and untracked worktree.
 3. Fetch `origin/master` without tags:
 
    ```bash
@@ -33,13 +54,20 @@ Do not bump files until every preflight condition passes.
    `CHANGELOG.md`, with nothing staged.
 3. Verify that `[project].version`, the release heading
    `## [X.Y.Z] - YYYY-MM-DD`, and the intended `vX.Y.Z` tag agree.
-4. Run all repository gates on the bumped worktree:
+4. Use Python 3.14 and run all repository gates on the bumped worktree:
 
    ```bash
    python -m pytest
    python -m ruff check
    npx --yes markdownlint-cli2 "**/*.md"
    ```
+
+5. Remove the temporary artifacts produced by validation. Recheck the complete
+   working tree: only `pyproject.toml` and `CHANGELOG.md` may differ, with nothing
+   staged. Verify that tests did not create consumer configs or session state in
+   the development repository root. Do not delete unrelated files to pass this gate.
+6. Record passed, failed and skipped checks, including the reason for any skips.
+   Distinguish mocked participant tests from live model/runtime validation.
 
 If any check fails, stop with the bump changes left uncommitted for inspection.
 Do not commit, tag, or push a failing release candidate.

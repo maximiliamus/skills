@@ -1,0 +1,4 @@
+interface:
+  display_name: "Conduct Paired Review"
+  short_description: "Agree on revisions and actionable improvement plans"
+  default_prompt: "Use $conduct-paired-review to agree on improvements with the author and critic, then incorporate the agreed results into the original proposal or review."
