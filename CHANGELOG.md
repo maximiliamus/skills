@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
 - Use `conduct-paired-review` to review proposals, plans, and existing
   functionality with two models. Turn their findings and disagreements into
   agreed revisions or an improvement plan, and retain the review history.
