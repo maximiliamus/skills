@@ -12,24 +12,52 @@ Use `runbook_session.py [--repo-root PATH] COMMAND`. `reserve SELECTOR` and
 stdout. `init`, `update`, `list`, `register ID PATH` and `unregister ID` retain
 their discovery contract with `ok`, `changed` and `runbooks`.
 
-A selector is a registered ID or repository-relative Markdown path. Both can
-locate the same open run. `status RUN_ID` reads any run identified by UUID,
-including a finished run. Active runs are also available with `status SELECTOR`.
+A selector is a registered ID or repository-relative Markdown path. Both
+locate the most recently started saved run of the same runbook, including a
+closed run. `status RUN_ID` reads a specific retained run by UUID.
 Status exposes current steps, their assessments, blockers and attempt history,
 available slots, ready steps, pause and question state, unsettled work and
-publication intents. It includes the frozen procedure under
-`contract.instructions`. Status omits ownership tokens.
+publication intents. `startedAt` is the first event time, `lastActivityAt` is
+the last recorded event time, `pausedAt` is the event time when the current
+pause became settled, and `lastStepId` identifies the last recorded step when
+available. Use harness evidence to determine whether a coordinator is still
+working. A journal marked `parked` has yielded its execution ownership to
+another run. Status includes frozen `contract.instructions`, source equality
+under `sourceMatches`, and the run's repository-relative `artifactsDirectory`
+and `stagingDirectory`. Flat journals have a null `artifactsDirectory`.
+Status omits ownership tokens and leaves history intact.
 
 Errors have `ok: false`, `code`, `message` and `details`. Exit status is 0 on
 success, 1 for `INVALID_REQUEST`, `NOT_FOUND`, `UNSUPPORTED_SCHEMA` or
 `IO_ERROR`, and 2 for `CONFLICT`, `BLOCKED` or `DECISION_REQUIRED`.
 
-Keep the root registry schema and place journals under
-`.runbooks/runs/<runId>.json`. Use a repository-local OS lock for readers and
-writers and atomic journal replacement. New reservations use the
-[v5 schema](runbook-journal-v5.schema.json). The helper reads and continues
-[v4 journals](runbook-journal-v4.schema.json) in their original format and
-checks both versions for open runs and unresolved publication intents.
+Keep the registry at the repository root. Each new UUID has a folder
+`.runbooks/history/<runId>/` containing `journal.json` in
+[v5 format](runbook-journal-v5.schema.json), `artifacts/` and any `staging/`.
+The helper also reads flat [v4](runbook-journal-v4.schema.json) and v5 journals
+at `.runbooks/runs/<runId>.json` in their original layout. All supported
+journals participate in history and publication checks.
+
+`journalRetention` in the registry is scoped separately to each runbook and
+can be overridden by the runbook's entry. The default is `3`. A positive
+integer sets the number of retained runs, including unfinished runs, and
+`"all"` keeps all of them. New journals record reservation order under the
+repository lock. Earlier journals use their start timestamps and UUIDs when
+timestamps tie. A saved `close` with `mode: finish` inside
+the retention window makes rotation effective. Older closed or parked runs
+outside the window are eligible for removal once their work, shared effects,
+and publication intents have settled. History can grow past the limit until
+such a completion.
+Readers and writers share a repository-local OS lock. Replaying the
+completion request can finish cleanup after an interruption. `cleanupPending`
+indicates physical cleanup still to finish. A folder that cannot be removed
+stays queued while other eligible folders are cleaned up. Cleanup moves
+verified data to a private location before removal so retries leave any
+files subsequently written at the original path intact. If an older queue
+contains a readable journal with unsettled effects, that run is retained
+for recovery. Remaining files from incomplete old deletions are preserved.
+A retired UUID cannot be reused. Unsupported earlier journals stay where
+they are.
 
 ## Reserve and change
 
@@ -37,10 +65,26 @@ Reserve with a hyphenated UUID `runId`. The helper normalizes UUIDs to
 lowercase. Before creating an active run it freezes the executable instructions,
 settings, step order, graph and output paths. Optional `stepContracts` maps
 step IDs to checked procedure facts. Supported facts are `gapCauses`, `reuse`,
-`reassessAfterInvalidation`, positive integer `points` and supporting
-`procedure` citations. A citation has `path`, `sha256` and `section`.
+`reassessAfterInvalidation`, positive integer `points`, named `outputs` and
+supporting `procedure` citations. A procedure citation has `path`, `sha256`
+and `section`.
 Supply `modelFamily` with `overrideDecision` for an authorized initial operator
 selection. Both reservation and takeover return an opaque `ownershipToken`.
+
+When the latest journal is open, starting over requires `restart` with its
+`runId` and `ifRevision`, the operator's `decision` and `evidence` that the
+old coordinator cannot issue work. Settle live attempts, effects and
+publication intents before switching. The previous tenure is fenced when the
+new reservation commits. A retained parked run can be selected by UUID and
+claimed with a fresh takeover when another current run is closed or safely
+paused. If the latest journal is closed, an older parked run does not require
+a restart decision for an ordinary new reservation.
+
+Before offering to continue an open run, require `sourceMatches`. The helper
+checks the SHA-256 of the current full Markdown bytes against the hash from
+reservation on takeover, unpause and admission. An unavailable or changed
+source blocks continuation. Restoring the original bytes permits it. Already
+started work and publication intents can still be reconciled.
 
 Each change includes UUID `requestId`, positive integer `ifRevision`, `type`
 and object `data`. Every change except `takeover` requires the current
@@ -69,6 +113,54 @@ Record the actual observation and a reference to the returned result, command
 exit, operator confirmation or other relevant evidence. A `decision` contains
 `instruction` and `reference` to the operator's authorization. Flexible
 finalization decisions also include `choice` of `accept` or `reject`.
+
+### Named outputs in prose
+
+The coordinator reads the whole procedure before reservation and identifies
+every mandatory named output in the operative instructions. Authors can use
+ordinary prose, such as `` Write the final audit report to `report.md`. ``.
+Shared instructions can assign an output to its producing step. Frontmatter,
+references to inputs, optional files, quotations and examples carry no output
+requirement.
+
+An example introduced in prose can extend across paragraphs up to the next
+heading or step. Fences and quotations bound their own examples.
+
+Supply `stepContracts.<stepId>.outputs` with the complete output inventory
+for each step, including an empty array for a step with no named prose
+outputs. Each entry contains `path`, the 1-based source `line` in the entire
+Markdown file and the `sha256` of the full source bytes. Use the literal path
+named on that line, including any explicit `repo:` prefix or `{runId}`.
+The default `scope: step` checks that the line belongs to the step and
+contains that path. Use `scope: runbook` when an operative section elsewhere
+in the document assigns the output to this step. Cite the line with the path.
+The entry still belongs under the producing step's ID. The coordinator
+determines what the prose requires and resolves unclear ownership before
+reserving the run.
+
+```json
+{
+  "stepContracts": {
+    "write-report": {
+      "outputs": [
+        {
+          "line": 32,
+          "path": "report.md",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ]
+    }
+  }
+}
+```
+
+The helper also recognizes the standalone form `` Write … to `path`. ``
+in unconditional operative text, including for direct CLI callers. When a
+conditional branch applies, cite its required outputs using the same format.
+The helper combines automatically recognized outputs, the coordinator's
+citations and existing deliverable markers. Matching declarations for one
+step resolve to one frozen output. The journal uses the same resolved
+`deliverables` list for publication, digest verification and completion.
 
 ### Unmarked sequential procedures
 
@@ -106,7 +198,12 @@ original request, including the inventory when supplied.
 
 - `takeover` carries `evidence` that the former coordinator cannot issue any
   more work, including previously prepared sends. It rotates local ownership
-  at the given revision. Reconcile previously handed-off attempts separately.
+  at the given revision. Use `recoveryOnly: true` if a current run needs
+  reconciliation while its Markdown is unavailable or changed. That tenure
+  supports settlement and publication recovery. A previously abandoned run
+  with pending effects accepts this recovery-only takeover. New work
+  requires an execution takeover with matching source. Reconcile previously
+  handed-off attempts separately.
 - `admit` carries `stepId`, `execution` (`inline` or `delegated`), `sources`
   as an array of `{path, sha256}` fingerprints, and `prerequisites` mapping
   each required ID to its current assessment event. Provide empty containers
@@ -130,7 +227,10 @@ original request, including the inventory when supplied.
   `decision` containing the answer. With `kind: attempt` it takes `attempt`
   and verified stop `evidence`. Reconcile a shared-state effect with
   `effects` of `no-effect` or `safe-repeat` and an operator `decision` when
-  new authority is needed. To recover an applicable original outcome, verify
+  new authority is needed. A previously abandoned run with pending effects
+  accepts attempt resolution with an explicit `effects` disposition and stays
+  abandoned. A later completion can apply normal retention to the settled run.
+  To recover an applicable original outcome, verify
   it and submit the result on that attempt. Publication recovery is below.
 - `set-pause` takes `requested: true` and a pause `decision` or run-wide
   question `text`. With `requested: false`, include an operator `decision`
@@ -150,8 +250,8 @@ original request, including the inventory when supplied.
   and `decision`. Future attempts use the override within its scope. Changes
   to frozen executable instructions need a new run.
 - `close` with `mode: finish` verifies all current assessments and artifacts.
-  With `mode: abandon` it requires a `decision` and settled active work.
-  Reconcile outstanding publication intents before closing either way.
+  With `mode: abandon` it requires a `decision`. Both modes require workers,
+  shared-state effects and publication intents to be settled.
 
 ## Native dispatch and models
 
@@ -207,14 +307,28 @@ its run ID.
 
 ## Publish and recover
 
-Declare each output with a top-level `<!-- deliverable: path -->` inside its
-step. The helper expands `{runId}` and rejects redirected, colliding and
-overlapping targets. For a current result or reuse, submit one entry per
-declared path with the following fields.
+Keep the files a runbook creates for a run under the provided
+`artifactsDirectory` by default. The named output `report.md` in a step
+resolves to `.runbooks/history/<runId>/artifacts/report.md`.
+Use a relative path such as `checks/result.json` for a private subdirectory.
+When a procedure publishes elsewhere, name a path such as
+`repo:reports/report.md` in the step and state that location and
+its lifecycle in the procedure. Frozen contracts retain their resolved paths.
+For new runs of an existing procedure, prefix any previously external
+declaration with `repo:` to keep that destination.
 
-- `path` is the declared target.
-- `stagedPath` points beneath `.runbooks/staging/<runId>/<attempt>`. Use
-  `.runbooks/staging/<runId>/reuse` for reuse.
+The helper expands `{runId}` and rejects redirected, colliding and overlapping
+targets. For new declarations, only the current run's `artifacts/` is writable
+as a deliverable within history. The journal, staging and other runs are
+protected. Retiring a run removes its entire folder, including private reports,
+other files and staged copies. External destinations keep their own lifecycle.
+For a current result or reuse, submit one entry per declared path with the
+following fields.
+
+- `path` is the resolved target from the frozen step contract.
+- `stagedPath` points beneath `<stagingDirectory>/<attempt>/`. Use
+  `<stagingDirectory>/reuse/` for reuse. Flat journals keep staging in
+  `.runbooks/staging/<runId>/`.
 - `sha256` is the verified staged digest.
 - `priorSha256` is the expected target digest, or `null` for a new target.
   Include `replacement` evidence of authority when replacing existing content.

@@ -180,7 +180,7 @@ def test_reservation_preserves_canonical_id_and_open_alias(tmp_path):
     assert client.status(RUNBOOK)["runId"] == client.run_id
     assert client.status("procedure")["runId"] == client.run_id
     call(tmp_path, "reserve", RUNBOOK, payload={"runId": str(uuid4())}, error="CONFLICT")
-    journal = tmp_path / ".runbooks" / "runs" / f"{client.run_id}.json"
+    journal = tmp_path / ".runbooks" / "history" / client.run_id / "journal.json"
     assert json.loads(journal.read_bytes())["schemaVersion"] == 5
 
 
@@ -409,11 +409,11 @@ def test_flexible_threshold_uses_exact_integer_ratio(tmp_path, threshold, needs_
 def declare_deliverables(client, *paths):
     with (client.root / client.runbook).open("a", encoding="utf-8") as instructions:
         for path in paths:
-            instructions.write(f"\n<!-- deliverable: {path} -->\n")
+            instructions.write(f"\n<!-- deliverable: repo:{path} -->\n")
 
 
 def staged_file(client, attempt, target, content):
-    staged_path = Path(".runbooks") / "staging" / client.run_id / str(attempt) / target
+    staged_path = Path(client.view["stagingDirectory"]) / str(attempt) / target
     staged_file = client.root / staged_path
     staged_file.parent.mkdir(parents=True, exist_ok=True)
     staged_file.write_bytes(content)
@@ -501,6 +501,14 @@ def test_publication_intent_survives_partial_replacement_and_blocks_overlap(tmp_
     assert not intent["stale"] and set(intent["targets"]) == {first, second}
     for output in outputs:
         assert (tmp_path / output["stagedPath"]).is_file()
+    restart = {
+        "runId": client.run_id,
+        "ifRevision": recovered["revision"],
+        "decision": DECISION,
+        "evidence": STOPPED,
+    }
+    call(tmp_path, "reserve", RUNBOOK, payload={"runId": str(uuid4()), "restart": restart},
+         error="BLOCKED")
 
     overlap = Client(tmp_path, "report", runbook="other.md")
     declare_deliverables(overlap, second)
@@ -527,6 +535,9 @@ def test_publication_intent_survives_partial_replacement_and_blocks_overlap(tmp_
         "evidence": STOPPED,
     }
     if recovery == "complete":
+        source = tmp_path / RUNBOOK
+        source.write_bytes(source.read_bytes() + b"\n")
+        assert not client.status()["sourceMatches"]
         client.change("resolve", resolution)
         assert client.step("report")["status"] == "done"
         assert (tmp_path / second).read_bytes() == b"second verified result"

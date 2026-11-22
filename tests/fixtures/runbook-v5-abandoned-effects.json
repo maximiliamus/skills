@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 5,
+  "runId": "44444444-4444-4444-8444-444444444445",
+  "runbook": {
+    "path": "run.md",
+    "sha256": "ee816305f47162004f4413c3d424f5d43292919948a9ad436dff616697c72d89"
+  },
+  "contract": {
+    "maxParallelSteps": 1,
+    "delegateSteps": false,
+    "stepOrder": "sequential",
+    "acceptancePolicy": "flexible",
+    "acceptanceThreshold": null,
+    "steps": [
+      {
+        "id": "check",
+        "title": "Check",
+        "deliverables": [],
+        "instruction": {
+          "startLine": 4,
+          "endLine": 6,
+          "path": "run.md",
+          "sha256": "ee816305f47162004f4413c3d424f5d43292919948a9ad436dff616697c72d89"
+        },
+        "dependsOn": {},
+        "modelFamily": "current",
+        "modelFamilyOrigin": "default",
+        "explicitTier": false,
+        "explicitEffort": false,
+        "modelTier": "medium",
+        "effortLevel": "medium",
+        "delegateSteps": false,
+        "maxAttempts": 1,
+        "procedure": [],
+        "gapCauses": [],
+        "reuse": false,
+        "reassessAfterInvalidation": false,
+        "points": 1
+      }
+    ],
+    "instructions": "# Audit\n\n<!-- step: check -->\n## Check\n\nVerify shared data.\n"
+  },
+  "events": [
+    {
+      "seq": 1,
+      "at": "2026-11-22T16:47:06+00:00",
+      "requestId": "44444444-4444-4444-8444-444444444445",
+      "requestDigest": "39d7eece74ba4320b0433f757eabc4958b04ef1560f78d3a1c7e422a7a25cfc3",
+      "type": "reserve",
+      "data": {
+        "ownershipToken": "-DJmaWa_2jvV8GQ-cJ3BMe6DBn8VRB_BqrYkg3uwe7A"
+      }
+    },
+    {
+      "seq": 2,
+      "at": "2026-11-22T16:47:07+00:00",
+      "requestId": "d0000000-0000-4000-8000-000000000001",
+      "requestDigest": "1341917d1c7e260ebf77b09f16677883819b882a42add9ab3ff2c236fae4e1d8",
+      "type": "admit",
+      "data": {
+        "stepId": "check",
+        "execution": "inline",
+        "sources": [],
+        "prerequisites": {},
+        "mutation": {
+          "target": "shared.txt",
+          "preconditions": "Compare the original snapshot",
+          "verify": "Inspect shared.txt"
+        },
+        "number": 1,
+        "requirements": {
+          "modelFamily": "current",
+          "modelFamilyOrigin": "default",
+          "modelTier": "medium",
+          "effortLevel": "medium",
+          "explicitTier": false,
+          "explicitEffort": false,
+          "delegateSteps": false
+        }
+      }
+    },
+    {
+      "seq": 3,
+      "at": "2026-11-22T16:47:07+00:00",
+      "requestId": "d0000000-0000-4000-8000-000000000002",
+      "requestDigest": "2f4bd94ac846a1b7e801034362ae725cfa8da165f446459a9ecb9e71835449d6",
+      "type": "observe",
+      "data": {
+        "attempt": 2,
+        "kind": "stopped",
+        "evidence": {
+          "statement": "The writer stopped.",
+          "reference": "fixture:worker-stop"
+        }
+      }
+    },
+    {
+      "seq": 4,
+      "at": "2026-11-22T16:47:07+00:00",
+      "requestId": "d0000000-0000-4000-8000-000000000003",
+      "requestDigest": "1a1de1661784909c584c41fbabb7edcbe178333b4759e1142ff85fa1b70be195",
+      "type": "close",
+      "data": {
+        "mode": "abandon",
+        "decision": {
+          "instruction": "Archive the audit",
+          "reference": "fixture:operator"
+        },
+        "result": "ABANDONED"
+      }
+    }
+  ]
+}

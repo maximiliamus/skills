@@ -204,7 +204,7 @@ def test_noncanonical_state_directory_is_rejected_before_locking(repo, name):
     assert not (repo / "runner-state").exists()
 
 
-@pytest.mark.parametrize("part", ["directory", ".locks", "runs"])
+@pytest.mark.parametrize("part", ["directory", ".locks", "runs", "history"])
 def test_store_rejects_redirected_directory(repo, part):
     target = repo / "redirect-target"
     target.mkdir()

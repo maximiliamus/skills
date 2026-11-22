@@ -306,6 +306,11 @@
         "data": {
           "type": "object",
           "properties": {
+            "reservationOrder": {
+              "description": "Order assigned to a new reservation under the repository lock.",
+              "type": "integer",
+              "minimum": 1
+            },
             "assessment": {
               "$ref": "#/$defs/assessment"
             }

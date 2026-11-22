@@ -11,9 +11,20 @@ Invoke the skill with `init` to create the project-owned
 `execute-guided-runbook.json`, or with `update` to validate the current file.
 Use `list`, `register ID PATH` and `unregister ID` to manage discovery. A
 repository-relative Markdown path can also select a runbook. Registry IDs and
-paths that identify the same runbook share an open run.
+paths that identify the same runbook share history and retention settings.
+Give each Markdown file one registered ID. Older configurations with
+multiple IDs for the same file need one entry before they can be used.
 
-The helper keeps journals, staging and the repository lock under `.runbooks`.
+Set `journalRetention` to a positive integer or `"all"`. The default is
+`3`. A registry entry can override the project setting for that runbook.
+Each runbook keeps its own history, counting the current run. After a run
+finishes and its final journal is saved, eligible older runs are trimmed by
+reservation order. History may exceed the limit while a new run is open.
+Starting, pausing, abandoning or checking a run leaves the previous folders
+in place. There is no age limit.
+
+The helper keeps new runs under `.runbooks/history/<runId>/`. A run's journal,
+private artifacts and staging are kept together and rotate as a unit.
 Keep the discovery registry at the repository root. See the
 [registry schema](references/runbook-registry.schema.json).
 
@@ -58,9 +69,8 @@ Verify the selected inputs and record evidence.
 <!-- step: report -->
 ## Record findings
 
-Write the report from the current check assessment.
-
-<!-- deliverable: reports/{runId}/report.md -->
+Write the final audit report to `report.md`.
+Use the current check assessment.
 ```
 
 ### Execution settings
@@ -97,18 +107,31 @@ explicitly.
 Per-step settings can override `modelFamily`, `modelTier`, `effortLevel`,
 `delegateSteps` and `maxAttempts`.
 
-Use top-level `<!-- deliverable: <path> -->` markers after the owning step's
-heading. Deliverable paths are repository-relative and can include `{runId}`.
-See the [execution contract](references/journal-contract.md) for model
-selection, output publication, recovery and assessment.
+State mandatory named outputs in the procedure. A shared section can assign
+an output to its producing step. The coordinator identifies all such outputs
+when it reads the procedure.
+A name such as `report.md` resolves to
+`.runbooks/history/<runId>/artifacts/report.md`. Keep other data under that same
+`artifacts/` directory by default. A relative path such as
+`checks/result.json` resolves there too. To publish outside the run folder,
+name the path explicitly with `repo:`, for example
+`repo:reports/report.md`, and specify its lifecycle in the runbook. Paths may
+include `{runId}`. Existing deliverable markers also work. See
+the [execution contract](references/journal-contract.md) for publication,
+recovery and assessment.
 
 ## Upgrade
 
-New runs use journal v5. The current helper can read and continue v4 runs
-with their existing graph, ordering rules, outcomes and history. The same
-registered ID or path still identifies an open v4 run. Use the current helper
-in every coordinator sharing the repository before reserving a v5 run. Older
-helpers cannot discover or continue v5 journals.
+New runs use journal v5 in a per-run folder. The current helper reads legacy
+flat v4 and v5 journals in place, with their original graph, ordering rules,
+outcomes, staging and output paths. Retention counts those journals and
+retires the flat journal alone. Existing external publications keep their
+own lifecycle. Use the current helper in every coordinator sharing the
+repository before reserving a run in the new layout.
+
+Existing journals keep their resolved deliverable paths. In new runs, add
+`repo:` to any older output path that should continue publishing to a
+repository path outside the run folder.
 
 For work from before v4 that is still needed, stop any earlier execution and
 reconcile its effects. Reserve a fresh run with the current procedure and
@@ -123,7 +146,16 @@ the coordinator records `done`. To pause, it stops handing off steps and waits
 for the already handed-off workers and their commands to finish. If the harness
 cannot confirm whether a worker or command ended, the run stays `pausing`.
 
-Resume from the journal's frozen procedure. Preserve applicable completed work
+An ordinary request starts a new independent run when the latest saved run
+is closed or history is empty. For the latest paused or interrupted run, use
+the journal to explain the situation before asking whether to continue or
+start a new run. An older open run can be selected explicitly by UUID.
+
+Resume from the journal's frozen procedure when the current Markdown bytes
+match the source fingerprint saved at reservation. Use a new run for revised
+instructions. The previous journal remains available for review and
+reconciliation within retention. Restoring the exact source bytes restores
+eligibility to continue. Preserve applicable completed work
 and retry safe unfinished steps within the recorded budget. When a new
 coordinator takes over, it records evidence that its predecessor can no
 longer issue work. Questions, outstanding effects and unresolved publication

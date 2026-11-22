@@ -6,6 +6,8 @@ import re
 
 DEFAULT_REGISTRY_FILENAME = "execute-guided-runbook.json"
 REGISTRY_SCHEMA_VERSION = 2
+DEFAULT_JOURNAL_RETENTION = 3
+RUN_FOLDER_MARKER = ".runbook-session"
 LEGACY_JOURNAL_SCHEMA_VERSION = 4
 JOURNAL_SCHEMA_VERSION = 5
 VERIFIED_OUTCOMES = {"PASS": "PASSED", "FAIL": "FAILED", "PASSED": "PASSED", "FAILED": "FAILED"}
@@ -28,6 +30,7 @@ REGISTRY_FIELDS = {
     "title",
     "path",
     "description",
+    "journalRetention",
 }
 
 

@@ -11,6 +11,7 @@ from .model import (
     ACCEPTANCE_POLICIES,
     DEFAULT_ACCEPTANCE_POLICY,
     DEFAULT_EFFORT_LEVEL,
+    DEFAULT_JOURNAL_RETENTION,
     DEFAULT_MODEL_TIER,
     DEFAULT_STEP_ORDER,
     EFFORT_LEVELS,
@@ -29,7 +30,7 @@ from .storage import (
     path_runbook_id,
     read_runbook_text,
 )
-from .validation import RequestError
+from .validation import RequestError, require
 
 
 def normalize_registry_path(
@@ -63,13 +64,20 @@ def validate_registered_id(runbook_id: str) -> None:
         raise RunbookError(f"Runbook id uses the reserved path-session namespace: {runbook_id}")
 
 
+def validate_retention(value: Any, subject: str) -> None:
+    require(
+        value == "all" or (type(value) is int and value > 0),
+        f"journalRetention must be a positive integer or 'all' in {subject}",
+    )
+
+
 def validate_registry(
     data: dict[str, Any],
     path: Path,
     repo_root: Path,
 ) -> dict[str, dict[str, Any]]:
     """Validate a project config or a template without publishing it."""
-    unknown_top_level = set(data) - {"schemaVersion", "runbooks", "stateDirectory"}
+    unknown_top_level = set(data) - {"schemaVersion", "runbooks", "stateDirectory", "journalRetention"}
     if unknown_top_level:
         fields = ", ".join(sorted(unknown_top_level))
         raise RunbookError(f"Unknown registry field(s) in {path}: {fields}")
@@ -78,12 +86,15 @@ def validate_registry(
         raise RequestError(f"Unsupported runbook registry schema in {path}", "UNSUPPORTED_SCHEMA")
     if data.get("stateDirectory", ".runbooks") != ".runbooks":
         raise RunbookError(f"Runbook state must live in .runbooks: {path}")
+    validate_retention(data.get("journalRetention", DEFAULT_JOURNAL_RETENTION), str(path))
 
     entries = data.get("runbooks")
     if not isinstance(entries, list):
         raise RunbookError(f"Registry runbooks must be a list in {path}")
 
     registry: dict[str, dict[str, Any]] = {}
+    registered_paths: dict[Path, str] = {}
+    registered_files: dict[tuple[int, int], str] = {}
     for raw_entry in entries:
         if not isinstance(raw_entry, dict):
             raise RunbookError(f"Every registry entry must be an object in {path}")
@@ -104,7 +115,7 @@ def validate_registry(
             raise RunbookError(
                 f"Runbook id must not contain surrounding whitespace: {runbook_id!r}"
             )
-        portable_path, candidate_path, _ = normalize_registry_path(relative_path, repo_root)
+        portable_path, candidate_path, resolved_path = normalize_registry_path(relative_path, repo_root)
 
         derived_title = candidate_path.stem.replace("-", " ").replace("_", " ").title()
         optional_values = {
@@ -130,6 +141,23 @@ def validate_registry(
         validate_registered_id(runbook_id)
         if runbook_id in registry:
             raise RunbookError(f"Duplicate runbook id: {runbook_id}")
+        alias = registered_paths.get(resolved_path)
+        try:
+            info = resolved_path.stat()
+        except OSError:
+            pass
+        else:
+            identity = (info.st_dev, info.st_ino)
+            alias = alias or registered_files.get(identity)
+            registered_files[identity] = runbook_id
+        require(
+            alias is None, f"Runbook path is already registered as {alias}: {portable_path}",
+            "CONFLICT",
+        )
+        registered_paths[resolved_path] = runbook_id
+        if "journalRetention" in raw_entry:
+            validate_retention(raw_entry["journalRetention"], f"runbook {runbook_id} in {path}")
+            entry["journalRetention"] = raw_entry["journalRetention"]
         registry[runbook_id] = entry  # type: ignore[assignment]
     return registry
 
@@ -138,39 +166,55 @@ def public_registry_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in entry.items() if not key.startswith("_")}
 
 
+def same_runbook_path(root: Path, first: str, second: str) -> bool:
+    if root / first == root / second:
+        return True
+    try:
+        left, right = (inside_repo(root, root / path) for path in (first, second))
+        return left == right or left.samefile(right)
+    except (OSError, RunbookError):
+        return False
+
+
+def registered_ids_for_path(root, path, registry):
+    return [key for key, entry in registry.items()
+            if same_runbook_path(root, entry["path"], path)]
+
+
+def select_runbook(selector, root, registry):
+    registered = registry.get(selector)
+    raw_path = registered["path"] if registered else selector
+    require(Path(raw_path).suffix.lower() == ".md", f"Unknown runbook selector: {selector}",
+            "NOT_FOUND")
+    path = normalize_registry_path(raw_path, root)[2]
+    relative = path.relative_to(root).as_posix()
+    matches = registered_ids_for_path(root, relative, registry)
+    require(len(matches) <= 1, "The path matches multiple registered identities", "CONFLICT")
+    registry_id = next(iter(matches), None)
+    if registry_id is not None:
+        path = normalize_registry_path(registry[registry_id]["path"], root)[2]
+    return path, registry_id
+
+
 def resolve_runbook(
     selector: str,
     repo_root: Path,
     registry: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
-    if selector not in registry and Path(selector).suffix.lower() == ".md":
-        _, _, selected_path = normalize_registry_path(selector, repo_root)
-        matches = sorted(
-            key
-            for key, entry in registry.items()
-            if inside_repo(repo_root, repo_root / entry["path"]) == selected_path
-        )
-        if matches:
-            selector = matches[0]
-    if selector in registry:
-        entry = registry[selector]
-        runbook_path = inside_repo(repo_root, repo_root / entry["path"])
+    runbook_path, registry_id = select_runbook(selector, repo_root, registry)
+    relative_path = runbook_path.relative_to(repo_root).as_posix()
+    if registry_id is not None:
+        entry = registry[registry_id]
         result: dict[str, Any] = {
             "id": entry["id"],
             "title": entry["title"],
             "path": str(runbook_path),
-            "relativePath": runbook_path.relative_to(repo_root.resolve()).as_posix(),
+            "relativePath": relative_path,
             "description": entry["description"],
             "_descriptionOverride": entry.get("_descriptionOverride", False),
             "registered": True,
         }
-    elif Path(selector).suffix.lower() != ".md":
-        raise RequestError(f"Runbook id is not registered: {selector}", "NOT_FOUND")
     else:
-        raw_path = Path(selector)
-        candidate = raw_path if raw_path.is_absolute() else repo_root / raw_path
-        runbook_path = inside_repo(repo_root, candidate)
-        relative_path = runbook_path.relative_to(repo_root.resolve()).as_posix()
         result = {
             "id": path_runbook_id(relative_path),
             "title": runbook_path.stem.replace("-", " ").title(),

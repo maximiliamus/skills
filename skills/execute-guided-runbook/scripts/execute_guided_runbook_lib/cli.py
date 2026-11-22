@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from pathlib import Path
 from secrets import token_urlsafe
@@ -17,10 +16,11 @@ from .configuration import (
     update_config,
 )
 from .contract import compile_contract
+from .history import RUN_ID, RunStore
 from .journal import Run
 from .model import (
+    DEFAULT_JOURNAL_RETENTION,
     JOURNAL_SCHEMA_VERSION,
-    LEGACY_JOURNAL_SCHEMA_VERSION,
     REGISTRY_SCHEMA_VERSION,
     VERIFIED_OUTCOMES,
     RunbookError,
@@ -30,15 +30,17 @@ from .registry import (
     document_title,
     normalize_registry_path,
     public_registry_entry,
+    registered_ids_for_path,
     resolve_runbook,
     runbook_document_properties,
+    same_runbook_path,
+    select_runbook,
     validate_registered_id,
     validate_registry,
 )
 from .storage import (
     configure_standard_streams,
     find_repo_root,
-    fixed_local_path,
     inside_repo,
     print_json,
     read_runbook_text,
@@ -46,7 +48,14 @@ from .storage import (
     utc_now,
     write_json_atomic,
 )
-from .transitions import Transitions, blocked, consistent, prepare_change, same_tenure_replay
+from .transitions import (
+    Transitions,
+    blocked,
+    consistent,
+    evidence,
+    prepare_change,
+    same_tenure_replay,
+)
 from .validation import (
     RequestError,
     decision,
@@ -54,12 +63,13 @@ from .validation import (
     digest,
     fields,
     integer,
-    protected_path,
+    matches_digest,
     require,
+    run_artifacts,
+    run_staging,
     uuid_string,
 )
 
-RUN_FILENAME = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.json")
 RETRYABLE = {"CONFLICT", "BLOCKED", "DECISION_REQUIRED"}
 
 
@@ -106,43 +116,16 @@ class Repository:
         self.path = path
         self.config = config
         self.registry = validate_registry(config, path, root)
-        state = fixed_local_path(root, ".runbooks", subject="Runbook state directory")
-        self.runs = fixed_local_path(state, "runs", subject="Run journal directory")
-
-    def journal_path(self, run_id):
-        return fixed_local_path(self.runs, run_id + ".json", subject="Run journal")
+        self.store = RunStore(root)
 
     def load(self, run_id):
-        path = self.journal_path(run_id)
-        relative = path.relative_to(self.root).as_posix()
-        path = protected_path(self.root, relative)
-        require(path.exists(), f"Run does not exist: {run_id}", "NOT_FOUND")
-        try:
-            journal = decode_json(path.read_bytes())
-        except (ValueError, UnicodeError, RequestError) as exc:
-            raise RequestError(f"Unreadable run journal {path}: {exc}", "IO_ERROR") from exc
-        version = journal.get("schemaVersion")
-        require(type(version) is int, f"Invalid run journal schema: {relative}", "IO_ERROR")
-        require(
-            version in {LEGACY_JOURNAL_SCHEMA_VERSION, JOURNAL_SCHEMA_VERSION},
-            f"Unsupported run journal schema: {relative}", "UNSUPPORTED_SCHEMA",
-        )
-        try:
-            fields(journal, ("schemaVersion", "runId", "runbook", "contract", "events"), label="journal")
-            require(journal["runId"] == run_id, "Mismatched journal ID")
-            require(isinstance(journal["events"], list) and journal["events"], "Missing reservation event")
-            return Run(self.root, journal)
-        except (KeyError, IndexError, TypeError, AttributeError, ValueError, RequestError) as exc:
-            raise RequestError(f"Invalid run journal {path}: {exc}", "IO_ERROR") from exc
+        require(run_id not in self.store.retired, f"Run was retired: {run_id}", "NOT_FOUND")
+        return self.store.read_run(run_id)
 
     def journals(self):
-        if not self.runs.exists():
-            return
-        for entry in self.runs.iterdir():
-            if not RUN_FILENAME.fullmatch(entry.name):
-                continue
+        for run_id in self.store.ids():
             try:
-                run = self.load(entry.stem)
+                run = self.load(run_id)
             except RequestError as exc:
                 # Other schema versions can occupy the same directory.
                 if exc.code != "UNSUPPORTED_SCHEMA":
@@ -150,64 +133,98 @@ class Repository:
             else:
                 yield run
 
-    def same_path(self, first, second):
-        if self.root / first == self.root / second:
+    def matches(self, run, path, registry_id):
+        recorded_id = run.runbook.get("id")
+        if registry_id is not None and recorded_id == registry_id:
             return True
+        if recorded_id in self.registry and registry_id in self.registry:
+            return False
+        return same_runbook_path(self.root, self.current_path(run), path)
+
+    def history(self, path, registry_id, *, journals=None):
+        if journals is None:
+            journals = self.journals()
+        return sorted(
+            (run for run in journals if self.matches(run, path, registry_id)),
+            key=lambda run: (run.reservation_order, run.started, run.run_id),
+            reverse=True,
+        )
+
+    def current_path(self, run):
+        entry = self.registry.get(run.runbook.get("id"), run.runbook)
+        return entry["path"]
+
+    def retirement_candidates(self, run):
+        path = self.current_path(run)
+        registry_id = run.runbook.get("id")
+        matches = registered_ids_for_path(self.root, path, self.registry)
+        if len(matches) > 1:
+            return []
+        if matches:
+            registry_id = matches[0]
+        limit = self.registry.get(registry_id, {}).get(
+            "journalRetention", self.config.get("journalRetention", DEFAULT_JOURNAL_RETENTION),
+        )
+        if limit == "all":
+            return []
+        history = self.history(path, registry_id)
+        if not any(item.run_id == run.run_id for item in history[:limit]):
+            return []
+        return [
+            item for item in history[limit:]
+            if item.settled and (item.terminal or self.store.parked(item))
+        ]
+
+    def source_matches(self, run):
         try:
-            old = inside_repo(self.root, self.root / first)
-            new = inside_repo(self.root, self.root / second)
-            return old.samefile(new)
-        except (FileNotFoundError, RunbookError):
+            source = inside_repo(self.root, self.root / self.current_path(run))
+            return matches_digest(source, run.runbook["sha256"])
+        except (OSError, RunbookError):
             return False
 
-    def matches(self, run, path, registry_id):
-        return self.same_path(run.runbook["path"], path) or (
-            registry_id is not None and run.runbook.get("id") == registry_id
-        )
+    def view(self, run, response=None):
+        response = run.projection() if response is None else response
+        matches = self.source_matches(run)
+        parked = self.store.parked(run)
+        if not matches or parked or run.owner["data"].get("recoveryOnly"):
+            response["ready"] = []
+        return response | {
+            "sourceMatches": matches,
+            "parked": parked,
+            "artifactsDirectory": None if run.flat else run_artifacts(run.run_id),
+            "stagingDirectory": run_staging(run.run_id, flat=run.flat),
+        }
 
-    def open_run(self, path, registry_id=None):
-        matches = [
-            run for run in self.journals()
-            if not run.terminal and self.matches(run, path, registry_id)
-        ]
-        consistent(
-            len(matches) <= 1, "Multiple open runs match the runbook identity",
-            runs=[run.run_id for run in matches],
+    def parkable(self, run, *, authorized=False):
+        require(
+            run.settled and (authorized or run.phase == "paused"),
+            "Settle the current run and its effects and publications before switching runs.",
+            "BLOCKED", runId=run.run_id, revision=run.revision,
         )
-        return next(iter(matches), None)
 
     def status(self, selector):
-        if RUN_FILENAME.fullmatch(selector.lower() + ".json"):
-            return self.load(uuid_string(selector, "run ID")).projection()
-        registry_id = selector if selector in self.registry else None
-        raw_path = self.registry[selector]["path"] if registry_id else selector
-        require(
-            Path(raw_path).suffix.lower() == ".md", f"Unknown runbook selector: {selector}",
-            "NOT_FOUND",
-        )
-        _, _, resolved = normalize_registry_path(raw_path, self.root)
-        path = resolved.relative_to(self.root).as_posix()
-        if registry_id is None:
-            matching_ids = [key for key, entry in self.registry.items()
-                            if self.same_path(entry["path"], path)]
-            consistent(len(matching_ids) <= 1, "The path matches multiple registered identities")
-            registry_id = next(iter(matching_ids), None)
-        run = self.open_run(path, registry_id)
-        if run is None:
-            raise RequestError(f"No open run for {selector}", "NOT_FOUND")
-        return run.projection()
+        if RUN_ID.fullmatch(selector.lower()):
+            return self.view(self.load(uuid_string(selector, "run ID")))
+        path, registry_id = select_runbook(selector, self.root, self.registry)
+        history = self.history(path.relative_to(self.root).as_posix(), registry_id)
+        require(history, f"No saved run for {selector}", "NOT_FOUND")
+        return self.view(history[0])
 
     def reserve(self, selector, request):
         fields(
             request, ("runId",),
-            ("stepContracts", "stepInventory", "modelFamily", "overrideDecision"), "reservation",
+            ("stepContracts", "stepInventory", "modelFamily", "overrideDecision", "restart"),
+            "reservation",
         )
         run_id = uuid_string(request["runId"], "runId")
         request_digest = digest({"selector": selector, "input": request | {"runId": run_id}})
-        target = self.journal_path(run_id)
+        consistent(run_id not in self.store.retired, "Run ID was previously used and retired")
+        target = self.store.journal_path(run_id)
         if target.exists():
             run = self.load(run_id)
-            return same_tenure_replay(run, run.events[0], request_digest)
+            consistent(not self.store.parked(run), "Coordinator tenure was superseded")
+            replay = same_tenure_replay(run, run.events[0], request_digest)
+            return self.store.finish_response(self.view(run, replay))
         operator_family = None
         if "modelFamily" in request:
             require("overrideDecision" in request, "Model selection requires a decision",
@@ -219,15 +236,30 @@ class Repository:
         document = resolve_runbook(selector, self.root, self.registry)
         path = document["relativePath"]
         registry_id = document["id"] if document["registered"] else None
-        opened = self.open_run(path, registry_id)
-        if opened is not None:
-            raise RequestError(
-                "The runbook already has an open run.",
-                "CONFLICT",
-                runId=opened.run_id,
-                revision=opened.revision,
-                schemaVersion=opened.journal["schemaVersion"],
+        journals = list(self.journals())
+        history = self.history(path, registry_id, journals=journals)
+        latest = history[0] if history else None
+        restart_id = None
+        if "restart" in request:
+            restart = request["restart"]
+            fields(restart, ("runId", "ifRevision", "decision", "evidence"), label="restart")
+            restart_id = uuid_string(restart["runId"], "restart run ID")
+            revision = integer(restart["ifRevision"], "restart revision")
+            decision(restart["decision"])
+            evidence(restart["evidence"])
+            consistent(
+                latest is not None and not latest.terminal and latest.run_id == restart_id
+                and latest.revision == revision,
+                "The latest open run changed; check status before restarting",
             )
+        if latest is not None and not latest.terminal and restart_id is None:
+            raise RequestError(
+                "The latest run is open.", "CONFLICT", runId=latest.run_id,
+                revision=latest.revision, schemaVersion=latest.journal["schemaVersion"],
+            )
+        park = [run for run in history if not run.terminal and not self.store.parked(run)]
+        for previous in park:
+            self.parkable(previous, authorized=previous.run_id == restart_id)
         step_inventory = request.get("stepInventory")
         if "stepInventory" in request:
             fields(step_inventory, ("sha256", "steps"), label="stepInventory")
@@ -239,7 +271,12 @@ class Repository:
         if registry_id is not None:
             runbook["id"] = registry_id
         token = token_urlsafe(32)
-        data = {"ownershipToken": token}
+        data = {
+            "ownershipToken": token,
+            "reservationOrder": max((run.reservation_order for run in journals), default=0) + 1,
+        }
+        if restart_id is not None:
+            data["restart"] = request["restart"]
         if operator_family is not None:
             data.update(modelFamily=operator_family, decision=request["overrideDecision"])
         journal = {
@@ -249,15 +286,15 @@ class Repository:
             "contract": contract,
             "events": [event(1, run_id, request_digest, "reserve", data)],
         }
-        self.runs.mkdir(mode=0o700, exist_ok=True)
         run = Run(self.root, journal)
-        self.save(run)
-        return run.projection() | {
+        self.store.stage(run, [], park)
+        self.store.create(run)
+        return self.store.finish_response(self.view(run) | {
             "ownershipToken": token, "duplicate": False, "committedRevision": run.revision,
-        }
+        })
 
     def save(self, run):
-        write_json_atomic(self.journal_path(run.run_id), run.journal, default_mode=0o600)
+        write_json_atomic(self.store.journal_path(run.run_id), run.journal, default_mode=0o600)
 
     def prepare_publication(self, sid, outputs, run, scope):
         intents = run.intents.values()
@@ -272,7 +309,7 @@ class Repository:
         seq = integer(source["event"], "source event")
         run = self.load(uuid_string(source["runId"], "source run ID"))
         registry_id = receiving.runbook.get("id")
-        blocked(self.matches(run, receiving.runbook["path"], registry_id),
+        blocked(self.matches(run, self.current_path(receiving), registry_id),
                 "Reuse requires a journal for this runbook")
         require(seq <= run.revision, "Unknown source event", "NOT_FOUND")
         entry = run.events[seq - 1]
@@ -289,13 +326,42 @@ class Repository:
         run = self.load(uuid_string(identifier, "run ID"))
         durable_revision = run.revision
         try:
+            parked = self.store.parked(run)
+            if parked:
+                consistent(isinstance(request, dict) and request.get("type") == "takeover",
+                           "Run was parked; an explicit takeover is required")
             replay, request_info = prepare_change(run, request)
+            completing = request["type"] == "close" and request["data"].get("mode") == "finish"
             if request_info is None:
-                return replay
+                if parked:
+                    raise RequestError("Coordinator tenure was superseded", "CONFLICT")
+                return self.store.finish_response(self.view(run, replay), clean=completing)
             request_id, request_digest, operation = request_info
             data = Transitions(run, self).take(operation, request["data"])
+            park = []
+            if operation == "takeover":
+                if data.get("recoveryOnly"):
+                    blocked(not parked, "A parked run has no active work to settle")
+                else:
+                    blocked(self.source_matches(run), "The runbook source changed or is unavailable")
+                    registry_id = run.runbook.get("id")
+                    selector = registry_id if registry_id in self.registry else self.current_path(run)
+                    path, selected_id = select_runbook(selector, self.root, self.registry)
+                    park = [other for other in
+                            self.history(path.relative_to(self.root).as_posix(), selected_id)
+                            if other.run_id != run.run_id and not other.terminal
+                            and not self.store.parked(other)]
+                    for other in park:
+                        self.parkable(other)
+            elif operation in {"admit", "assess"} or (
+                operation == "set-pause" and not data["requested"]
+            ):
+                blocked(
+                    self.source_matches(run) and not run.owner["data"].get("recoveryOnly"),
+                    "Continuing work requires the original runbook source and execution ownership",
+                )
             if "duplicateResult" in data:
-                return run.projection() | {"duplicate": True, "committedRevision": data["duplicateResult"]}
+                return self.view(run) | {"duplicate": True, "committedRevision": data["duplicateResult"]}
             outputs = data.pop("_outputs", [])
             if outputs:
                 intent_id = run.revision + 1
@@ -306,16 +372,23 @@ class Repository:
                 run.append(event(intent_id, request_id, request_digest, "publication-intent", intent))
                 self.save(run)
                 durable_revision = run.revision
-                publication.publish(self.root, outputs)
+                publication.publish(self.root, outputs, run_id=run.run_id, flat=run.flat)
                 self.require_published_applicability(run, data["assessment"])
                 data = data | {"publication": intent_id}
             elif operation == "resolve" and data.get("disposition") == "complete":
                 intent = run.intents[data["intent"]]
-                publication.publish(self.root, intent["artifacts"], recover=True)
+                publication.publish(
+                    self.root, intent["artifacts"], run_id=run.run_id, flat=run.flat, recover=True,
+                )
                 self.require_published_applicability(run, intent["eventData"]["assessment"])
             run.append(event(run.revision + 1, request_id, request_digest, operation, data))
+            retire = self.retirement_candidates(run) if completing else []
+            self.store.stage(run, retire, park)
             self.save(run)
-            response = run.projection() | {"duplicate": False, "committedRevision": run.revision}
+            response = self.store.finish_response(
+                self.view(run) | {"duplicate": False, "committedRevision": run.revision},
+                clean=completing,
+            )
             if operation == "takeover":
                 response["ownershipToken"] = data["ownershipToken"]
             return response
@@ -376,7 +449,7 @@ class Repository:
         if old_path == new_path:
             return self.discovery()
         for path in {old_path, new_path} - {None}:
-            opened = self.open_run(path, identifier)
+            opened = next((run for run in self.history(path, identifier) if not run.terminal), None)
             if opened is not None:
                 raise RequestError(
                     "Registry edit would change an open run's identity",

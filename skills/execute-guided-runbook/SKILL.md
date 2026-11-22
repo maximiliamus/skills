@@ -5,69 +5,182 @@ description: Run or resume a Markdown repository runbook with native parallel wo
 
 # Execute Guided Runbook
 
-Use `scripts/runbook_session.py` in the target repository. Read the
-[execution contract](references/journal-contract.md) before operating the helper.
-The procedure and operator set the authority for actions, outputs and recovery.
+The helper is at `scripts/runbook_session.py` under the installed skill.
+Invoke it by its absolute path from the target repository or pass
+`--repo-root PATH` before the command. `reserve SELECTOR` creates a run and
+`change RUN_ID` records operations on it. Both take one UTF-8 JSON object on
+stdin. Read the [execution contract](references/journal-contract.md) for request
+shapes. The procedure and operator authorize actions, outputs and recovery.
 
-## Resolve the request
+## Set up or select a run
 
-- For `init`, initialize the project's `execute-guided-runbook.json` and return.
-  For `update`, validate that file and return. Preserve project settings.
-- Use `list`, `register ID PATH` and `unregister ID` for discovery. For execution,
-  select a registered ID or a repository-relative Markdown path.
-- Read the procedure and governing sources. Check `status` before reserving.
-  Continue an open v4 run under its saved rules. For older work that is
-  still needed, reconcile effects and start a fresh run. See
-  [Upgrade](README.md#upgrade).
-- For a new run, read the procedure and use its top-level step markers when
-  present. If there are none, read the explicit steps of the simple sequential
-  procedure in document order. Identify all steps from their heading or
-  ordered list item, giving each an ID and its source line. Exclude preamble,
-  notes and examples. Stop with a startup error identifying the missing or
-  ambiguous step before handing off any work. Report malformed markers.
-- Call `reserve` with a fresh run UUID and verified procedure facts. For the
-  unmarked sequence, supply `stepInventory` with the SHA-256 of the exact
-  Markdown bytes read and the ordered step anchors, as described in the
-  execution contract. Retain the returned local ownership token in the
-  coordinator context. Use the journal's frozen steps and instructions on
-  resume. If ownership changes, record evidence the former coordinator cannot
-  issue further work before `takeover`.
+- Run the helper's `init` to initialize the project's
+  `execute-guided-runbook.json` or `update` to validate it, then return.
+  Preserve project settings.
+  Use `list`, `register ID PATH` and `unregister ID` for discovery.
+- For execution, read the governing repository instructions. Call
+  `status SELECTOR` with the registered ID or repository-relative Markdown
+  path for an ordinary request. It selects the latest run by
+  reservation order. If there is no saved run or the latest is closed, prepare
+  a new independent run. If another unparked run blocks reservation, report
+  its UUID and respect its owner. Select an older run only when the operator
+  names its UUID.
+- For an open run, show its status. Use harness evidence or operator
+  confirmation to identify a pause or interruption. Treat uncertain work as
+  live until reconciled. Elapsed time alone provides no stop evidence.
+  For a confirmed pause or interruption, report the runbook, UUID, start time,
+  confirmed pause time or last recorded activity, last affected step,
+  completed outcomes and outstanding questions, attempts, effects or
+  publications. State the first continuation action and identify any unknown
+  interruption time or cause.
+- Offer to continue the latest paused or interrupted run or start a new one.
+  Wait for the operator's choice. For explicit continuation, read
+  `status RUN_ID` and use that open journal. Offer execution continuation
+  only when `sourceMatches` is true. Otherwise offer to restore the exact
+  original Markdown bytes or obtain a decision to start with an available
+  procedure. Resume using the frozen instructions and scheduling rules.
 
-## Coordinate execution
+## Recover ownership and settle previous work
 
-1. Read ready steps from `status` and check their inputs, dependencies,
-   permissions, available slots and retry safety. Use the current harness to
-   start independent steps in parallel within the configured limit. For a
-   simple sequential procedure, wait for the first unfinished Markdown step's
-   current terminal outcome. Give each worker the exact instructions,
-   inputs, allowed actions and expected outputs. Required fresh delegation or
-   explicit model requirements that the harness cannot meet leave the step
-   pending with a concrete explanation.
-2. Process a pause and initiate native handoffs on one serial path. Call `admit`
-   immediately before each handoff. Send only on a fresh admission. For a
-   definitive no-start, record it, then admit afresh when eligible. An
-   ambiguous start retains its slot and attempt charge until reconciled.
-3. Ask workers to wait for their commands to finish before returning. Verify the
-   result and required artifacts, then record it with `observe`. A current
-   verified negative result can be `done`. Stage mandatory outputs at the
-   documented run and attempt paths so the helper can publish them and commit
-   `done` under its lock.
-4. Relay local questions and record answers through `resolve`, including
-   during drain. A live worker waiting for an answer holds its slot. A parked
-   question remains a hold on its step after the worker and commands settle.
-   Stop sending work on `set-pause`. Confirm `paused` when all handed-off work
-   and commands ended or definitively never started.
-5. Preserve applicable `done` results on resume. Recheck outstanding attempts,
-   effects and publication intents before repeating work. Use evidence of
-   actual settlement for unreachable work. Continue safe unfinished steps
-   within budget, and report the specific blocker when an effect or worker
-   cannot be accounted for. Invalidate old inputs and assessment references
-   before reusing or replacing affected evidence.
-6. Check every current assessment and mandatory deliverable before `close`.
-   Record an explicit decision when the applicable policy requires one. Report
-   the final assessment, score, deliverables and unresolved limitations.
+The current owner can reconcile work with its token. An incoming coordinator
+confirms the previous owner cannot issue further work, including prepared
+handoffs, and submits that evidence in `takeover` at the current revision.
+Use `recoveryOnly: true` for settlement with changed or unavailable Markdown.
+Continuing work requires matching source and execution ownership. A parked
+run has yielded ownership. To reclaim it by UUID, use a fresh execution
+takeover with matching source and evidence fencing the former owner. Any
+other unparked open run of that procedure must be closed or settled and paused.
 
-After uncertain JSON delivery, consult `status` or replay the identical request.
-The current owner can reconcile ambiguous handoffs from ordinary harness
-observations. Keep the ownership token in the coordinator and out of worker
-prompts.
+Account for live attempts, shared effects and publication intents before
+switching runs. After verified settlement, recover an applicable verified
+outcome on its original attempt when possible. For uncertain effects,
+inspect the original target and preconditions and record the disposition
+through `resolve`. Report the specific blocker if safe settlement cannot be
+established. For an older abandoned run with pending effects, select its UUID,
+use recovery-only takeover and resolve the original attempt with verified
+evidence and an explicit effect disposition. The run stays abandoned.
+
+To supersede the latest open run, include its UUID, post-settlement revision,
+the operator's decision and evidence that the old coordinator can issue no
+more work in the new reservation's `restart`. A settled predecessor can be
+superseded directly. An incoming owner needs a takeover first when it must
+settle the predecessor.
+
+If a reservation or takeover reply is uncertain, replay the identical request
+while its tenure is current to recover the ownership token. `status` omits the
+token. Keep it in the coordinator context and out of worker prompts. For other
+uncertain changes, inspect the current projection or replay the identical
+request. See
+[Reservation and change](references/journal-contract.md#reserve-and-change).
+
+## Prepare a new reservation
+
+Use the procedure's top-level step markers and IDs when present. Without
+markers, accept only a one-slot sequential procedure without an explicit
+dependency graph. Supply the complete ordered `stepInventory` with the
+exact Markdown SHA-256 and documented
+[step anchors](references/journal-contract.md#unmarked-sequential-procedures).
+Exclude preamble, notes and examples. Stop with a startup error for malformed
+markers or a missing or ambiguous step.
+
+Read the whole procedure, including operative shared prose. Identify each
+step's mandatory named outputs. Frontmatter, input references, incidental
+mentions, optional outputs, quotations and examples carry no requirement.
+Include only applicable conditional branches. If a runtime condition leaves
+the required path or producing step uncertain, resolve it with a clarified
+procedure or operator decision before reservation.
+
+Reserve a fresh UUID with the verified procedure facts. Submit the complete
+[output inventory](references/journal-contract.md#named-outputs-in-prose)
+for each step, including outputs assigned in shared prose. Use an empty list
+when a step has no required prose outputs. Supply applicable gap causes,
+reuse and reassessment permissions, and nondefault step weights with their
+supporting procedure citations. For an initial model override, supply the
+model family and the documented operator decision.
+Compare the frozen outputs returned by the helper with the intended set,
+including existing deliverable markers. On mismatch, stop before dispatch.
+Obtain authority to abandon or restart and reserve the corrected contract.
+Clarify the governing text under appropriate authority when its unconditional
+instructions themselves declare the unwanted output.
+
+## Admit work and publish deliverables
+
+1. Use `status` to check readiness, inputs, dependencies, permissions, slots
+   and retry safety. Run independent ready steps in parallel within capacity.
+   In v5, a one-slot sequential run without a graph waits for the first
+   Markdown step without a current terminal assessment, including a marked
+   step. With a graph, normally choose the first ready step for single-slot
+   sequential work. Follow the original scheduling and outcome rules for a
+   continued v4 run.
+2. Choose inline execution when permitted or a fresh delegated worker when
+   required. Establish the required model facts for either execution mode.
+   If the harness cannot meet a requirement, leave the step pending and state
+   why. Serialize pause handling and dispatch. Just before starting each
+   attempt, `admit` the material repository-file input paths and SHA-256
+   digests, the exact current prerequisite assessment events, and the
+   target, preconditions and verification for any shared or external mutation.
+   The helper checks mutation interference within the run.
+3. Start work only on a fresh admission. A duplicate admission never
+   authorizes another send. Record uncertain starts as `lost-contact`.
+   Verified settlement releases the slot. Only definitive `no-start`
+   refunds the attempt. Before retrying, record the confirmed no-start or
+   settlement and check effects and the remaining budget. A non-transient
+   retry or budget increase requires operator authority. See
+   [dispatch](references/journal-contract.md#native-dispatch-and-models).
+4. Give the worker the frozen instructions, verified inputs and allowed
+   actions. Tell it to write private files under `artifactsDirectory` when
+   present and stage mandatory outputs only under
+   `<stagingDirectory>/<attempt>/`, using the admission event number. For reuse,
+   stage under `<stagingDirectory>/reuse/`. Flat v4 and v5 journals have a null
+   `artifactsDirectory` and use their returned staging directory. Only the
+   helper publishes mandatory outputs to the frozen targets. Ask workers to
+   report once their commands have ended.
+5. Verify that workers and their commands have ended. Verify the staged
+   bytes, expected prior target state and any replacement authority. Record
+   the verified result through `observe` with its deliverables. A v4 result uses
+   `PASS` or `FAIL` and omits `reason`. For unresolved publication, inspect the
+   intent and use `resolve` with the applicable publication disposition,
+   evidence and any required decision. See
+   [publication](references/journal-contract.md#publish-and-recover).
+
+The project registry sets retention for run folders, with per-runbook
+overrides. Eligible older folders rotate only after a finished run is saved.
+An explicit external destination such as `repo:reports/report.md` follows
+the lifecycle stated in the procedure.
+
+## Pause and resume
+
+A worker-local question holds its step and any dependent work. Record it as
+an `observe` question, then answer the recorded hold through `resolve`,
+including during drain. The attempt holds a slot until the worker and
+commands settle. A parked question still holds its step and can survive
+pause and resume.
+
+For an operator pause or a run-wide question, stop dispatch and request
+`set-pause` with `requested: true` and the operator's decision or the
+question text, respectively. Record worker and command settlement or
+definitive no-start, then read the derived `paused` phase. Answer a run-wide
+question through `resolve`, then use `set-pause` with `requested: false` and
+a separate operator decision to lift the settled pause.
+See [pause and resolution requests](references/journal-contract.md#changes).
+
+## Assess and finish
+
+Preserve applicable assessments. If an input or prerequisite changes,
+use `invalidate` with the cause and affected step IDs or recorded file
+references. Use `assess` for a procedure-authorized gap with its recorded
+trigger or for verified equivalent reuse. For reuse, verify the governing
+instructions, inputs, prerequisite assessments and required outputs. A
+verified negative outcome can be `done`. A gap cannot satisfy a mandatory
+output. Use `override` for an authorized budget or model change.
+
+Before either `close` mode, settle live work, shared effects and publication
+intents. Abandonment requires the operator's decision. Every `finish`,
+including a rejection under strict scoring, requires resolved questions,
+current assessments and verified published bytes for all mandatory outputs.
+For a deficient flexible score below the configured threshold, or with no
+threshold, obtain the operator's accept or reject decision. Report the
+returned result, score, deliverables and any limitations. If a completed
+finish reports `cleanupPending`, replay the identical finish to retry physical
+cleanup. Report any cleanup still pending without repeating step work.
+See [final assessment](references/journal-contract.md#final-assessment).

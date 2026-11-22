@@ -88,7 +88,13 @@ def prepare_change(run, request):
             consistent(request_digest == intent["requestDigest"], "Request ID was reused")
             blocked(False, "The original request has an unresolved publication intent")
     consistent(rev == run.revision, "Journal revision has changed", revision=run.revision)
-    consistent(not run.terminal, "The run is already closed")
+    if run.terminal:
+        data = request["data"]
+        can_recover = run.terminal == "abandoned" and run.pending_effects and (
+            (kind == "takeover" and data.get("recoveryOnly") is True)
+            or (kind == "resolve" and data.get("kind") == "attempt" and "effects" in data)
+        )
+        consistent(can_recover, "The run is already closed")
     return None, (rid, request_digest, kind)
 
 
@@ -101,8 +107,10 @@ class Transitions:
         return getattr(self, kind.replace("-", "_"))(data)
 
     def takeover(self, data):
-        fields(data, ("evidence",), label="takeover")
+        fields(data, ("evidence",), ("recoveryOnly",), "takeover")
         evidence(data["evidence"])
+        if "recoveryOnly" in data:
+            boolean(data["recoveryOnly"], "recoveryOnly")
         return data | {"ownershipToken": token_urlsafe(32)}
 
     def ready_inputs(self, step, data):
@@ -515,10 +523,11 @@ class Transitions:
         blocked(not any(a.live for a in self.run.attempts.values()), "Current work has not settled")
         blocked(not self.run.intents, "Reconcile publication intents before closing")
         if mode == "abandon":
+            blocked(not self.run.pending_effects, "Reconcile outstanding effects before abandoning")
             require_decision(data)
             return data | {"result": "ABANDONED"}
         blocked(
-            not self.run.questions and not any(a.effects_pending for a in self.run.attempts.values()),
+            not self.run.questions and not self.run.pending_effects,
             "Resolve outstanding questions and effects before finalizing",
         )
         cache = {}

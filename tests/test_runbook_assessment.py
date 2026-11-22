@@ -204,7 +204,7 @@ steps:
     facts["final-report"] = {"procedure": procedure, "reassessAfterInvalidation": report_repeat}
     text = marked(
         "prepare", *checks, "final-report", config=config,
-        ending="<!-- deliverable: .runbooks/reports/audit/{runId}/report.md -->\n",
+        ending="<!-- deliverable: repo:.runbooks/reports/audit/{runId}/report.md -->\n",
     )
     client = Client(repo, text, facts=facts, model=binding(tier="heavy", effort="high"))
     client.reserve()
@@ -329,7 +329,7 @@ def test_report_replacement_respects_frozen_permission_and_budget(repo, permissi
 def test_cross_run_reuse_publishes_verified_artifact_at_receiving_path(repo):
     procedure = policy(repo)
     facts = {"report": {"procedure": procedure, "reuse": True}}
-    text = marked("report", ending="<!-- deliverable: reports/{runId}/report.md -->\n")
+    text = marked("report", ending="<!-- deliverable: repo:reports/{runId}/report.md -->\n")
     previous = Client(repo, text, facts=facts)
     previous.reserve()
     source_path = f"reports/{previous.run}/report.md"

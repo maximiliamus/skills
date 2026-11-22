@@ -1,5 +1,6 @@
 {
   "schemaVersion": 2,
   "runbooks": [],
+  "journalRetention": 3,
   "stateDirectory": ".runbooks"
 }

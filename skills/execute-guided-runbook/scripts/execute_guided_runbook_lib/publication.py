@@ -14,17 +14,19 @@ from .validation import (
     paths_overlap,
     protected_path,
     require,
+    run_staging,
     sha256,
 )
 
 
 def prepare(root, run, step_id, supplied, stage_scope, other_intents):
     declared = run.steps[step_id].contract["deliverables"]
-    prefix = f".runbooks/staging/{run.run_id}/{stage_scope}"
+    staging = run_staging(run.run_id, flat=run.flat)
+    prefix = f"{staging}/{stage_scope}"
     outputs = []
     for item in array(supplied, "deliverables", empty=True):
         fields(item, ("path", "stagedPath", "sha256", "priorSha256"), ("replacement",), "deliverable")
-        target = protected_path(root, item["path"], deliverable=True)
+        target = protected_path(root, item["path"], deliverable=True, run_id=run.run_id, flat=run.flat)
         staged = protected_path(root, item["stagedPath"])
         blocked(
             staged.is_relative_to(root / prefix) and staged != root / prefix,
@@ -58,9 +60,9 @@ def prior_matches(target, expected):
     return not target.exists() if expected is None else matches_digest(target, expected)
 
 
-def publish(root, outputs, *, recover=False):
+def publish(root, outputs, *, run_id, flat=False, recover=False):
     for item in outputs:
-        target = protected_path(root, item["path"], deliverable=True)
+        target = protected_path(root, item["path"], deliverable=True, run_id=run_id, flat=flat)
         staged = protected_path(root, item["stagedPath"])
         wanted = item["sha256"]
         blocked(matches_digest(staged, wanted), f"Staged bytes are missing or changed: {staged}")
@@ -71,7 +73,7 @@ def publish(root, outputs, *, recover=False):
             f"Target changed before replacement: {item['path']}",
         )
         target.parent.mkdir(parents=True, exist_ok=True)
-        protected_path(root, item["path"], deliverable=True)
+        protected_path(root, item["path"], deliverable=True, run_id=run_id, flat=flat)
         fd, temporary = tempfile.mkstemp(prefix=".runbook-", suffix=".tmp", dir=target.parent)
         temporary = Path(temporary)
         try:
@@ -82,7 +84,7 @@ def publish(root, outputs, *, recover=False):
             blocked(matches_digest(temporary, wanted), f"Staged bytes changed while copying: {staged}")
             if item["priorSha256"] is not None:
                 storage.preserve_replacement_permissions(target, temporary)
-            protected_path(root, item["path"], deliverable=True)
+            protected_path(root, item["path"], deliverable=True, run_id=run_id, flat=flat)
             blocked(
                 prior_matches(target, item["priorSha256"]),
                 f"Target changed before replacement: {item['path']}",
@@ -91,5 +93,5 @@ def publish(root, outputs, *, recover=False):
         finally:
             temporary.unlink(missing_ok=True)
     for item in outputs:
-        target = protected_path(root, item["path"], deliverable=True)
+        target = protected_path(root, item["path"], deliverable=True, run_id=run_id, flat=flat)
         blocked(matches_digest(target, item["sha256"]), f"Published bytes changed: {item['path']}")

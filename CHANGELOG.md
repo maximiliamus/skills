@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Start a paired review by naming the project functionality you want to
   improve. The first reviewer writes the report that anchors the discussion
   and preserves the initial findings.
+- Name required outputs once in the runbook's instructions. Guided
+  runbooks verify those files during step acceptance and again at completion.
+- Keep each guided runbook's recent runs, private reports and supporting files
+  together. Keep earlier reports available until a new run has been saved as
+  complete. Preserve evidence for shared changes that still need
+  reconciliation. Set the history size per project or runbook and review
+  the latest run before choosing whether to continue or start over. Continue
+  with the original procedure when its source still matches.
+  See the [upgrade instructions](./skills/execute-guided-runbook/README.md#upgrade).
 
 ## [0.4.0] - 2026-11-21
 

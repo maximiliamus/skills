@@ -19,7 +19,9 @@ from .validation import (
     integer,
     paths_overlap,
     protected_path,
+    relative_name,
     require,
+    run_artifacts,
     sha256,
     string,
 )
@@ -29,17 +31,42 @@ STEP_SETTINGS = ("modelFamily", "modelTier", "effortLevel", "delegateSteps", "ma
 MARKER_CANDIDATE = re.compile(r" {0,3}<!--\s*(step|deliverable)\s*:")
 MARKER = re.compile(r" {0,3}<!--\s*(step|deliverable):\s+(.+?)\s*-->[ \t]*")
 HEADING = re.compile(r" {0,3}(#{1,6})[ \t]+(.+)")
+SETEXT = re.compile(r"=+|-+")
 ORDERED_ITEM = re.compile(r" {0,3}[0-9]{1,9}[.)][ \t]+(.+)")
 FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
 LIST = re.compile(r" {0,3}(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]+|$)")
+WRITE_OUTPUT = re.compile(
+    r"Write[ \t]+([^`]+?)[ \t]+to[ \t]+`([^`]+)`[.!]?", re.IGNORECASE,
+)
+QUALIFIED_OUTPUT = re.compile(
+    r"\b(?:optional(?:ly)?|if|unless|when|may|might|can|examples?|samples?)\b", re.IGNORECASE,
+)
+EXAMPLE_LEAD = re.compile(
+    r"(?:(?:for|as an?|by way of|in this)[ \t]+)?(?:examples?|samples?)\b|for instance\b|e\.g\.",
+    re.IGNORECASE,
+)
+OPTIONAL_LEAD = re.compile(r"optional\b|(?:if|when) (?:needed|desired|requested)\b", re.IGNORECASE)
+CONDITIONAL_LEAD = re.compile(r"(?:if|unless|only if|provided that)\b", re.IGNORECASE)
+OPTIONAL_WORD = re.compile(r"\boptional(?:ly)?\b", re.IGNORECASE)
+INLINE_CODE = re.compile(r"`([^`]+)`")
 
 
-def top_level_lines(lines, start):
+def top_level_lines(lines, start, *, list_prose=False, fence_starts=None):
     fence = None
     list_indent = 0
+    list_indents = []
     html_end = None
     for index in range(start, len(lines)):
         line = lines[index]
+        offset = 0
+        if list_prose and line.strip():
+            expanded = line.expandtabs(4)
+            indentation = len(expanded) - len(expanded.lstrip(" "))
+            while list_indents and indentation < list_indents[-1]:
+                list_indents.pop()
+            if list_indents:
+                offset = list_indents[-1]
+                line = expanded[offset:]
         if fence is not None:
             if re.fullmatch(r" {0,3}" + re.escape(fence[0]) + f"{{{len(fence)},}}[ \t]*", line):
                 fence = None
@@ -56,20 +83,27 @@ def top_level_lines(lines, start):
         list_indent = 0
         item = LIST.match(line)
         if item:
-            list_indent = item.end()
-            yield index + 1, line
-            continue
+            if not list_prose:
+                list_indent = item.end()
+                yield index + 1, line
+                continue
+            list_indents.append(offset + item.end())
+            line = line[item.end():]
         if line.lstrip().startswith(">"):
+            if list_prose:
+                yield index + 1, line
             continue
         opening = FENCE.fullmatch(line)
         if opening and (opening[1][0] == "~" or "`" not in opening[2]):
             fence = opening[1]
+            if fence_starts is not None:
+                fence_starts.add(index + 1)
             continue
         if not MARKER_CANDIDATE.match(line):
             if line.lstrip().startswith("<!--") and "-->" not in line:
                 html_end = re.compile(r"-->")
             elif block := re.match(
-                r" {0,3}<(pre|script|style|textarea)(?:[\s>]|$)", line, re.IGNORECASE
+                r" {0,3}<(pre|script|style|textarea|blockquote)(?:[\s>]|$)", line, re.IGNORECASE
             ):
                 end = re.compile(rf"</{block[1]}>", re.IGNORECASE)
                 if not end.search(line):
@@ -128,7 +162,105 @@ def inferred_steps(visible, line_count, step_inventory, revision):
     return steps
 
 
-def inventory(lines, start, root, run_id, *, step_inventory, revision):
+def is_example(text):
+    return EXAMPLE_LEAD.match(text) is not None or text.casefold().endswith("example:")
+
+
+def exclude_condition(text, *, include_conditionals):
+    return CONDITIONAL_LEAD.match(text) is not None and (
+        not include_conditionals or OPTIONAL_WORD.search(text) is not None
+    )
+
+
+def procedure_prose(lines, visible, span, *, include_conditionals=False, fence_starts=()):
+    """Yield source lines that can carry an operative output requirement."""
+    excluded_heading = None
+    excluded_paragraph = None
+    excluded_item = None
+    underline_line = None
+    quoted = False
+    for number in range(span["startLine"], span["endLine"] + 1):
+        if number == underline_line:
+            continue
+        if excluded_paragraph == "example-intro" and number in fence_starts:
+            # The fence already excludes the example from the visible prose.
+            excluded_paragraph = None
+            continue
+        raw = lines[number - 1]
+        if not raw.strip():
+            if excluded_paragraph == "body":
+                excluded_paragraph = None
+            quoted = False
+            continue
+        expanded = raw.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
+        if excluded_item is not None:
+            if indent > excluded_item:
+                continue
+            excluded_item = None
+        text = visible.get(number, "").strip()
+        if text.startswith(">"):
+            if excluded_paragraph == "example-intro":
+                excluded_paragraph = "body"
+            quoted = bool(text.lstrip(">").strip())
+            continue
+        level = 0
+        if heading := HEADING.fullmatch(text):
+            level, title = len(heading[1]), heading_title(heading)
+        elif text and number < span["endLine"] and not MARKER_CANDIDATE.match(text):
+            underline = visible.get(number + 1, "").strip()
+            if SETEXT.fullmatch(underline):
+                level, title = (1 if underline.startswith("=") else 2), text
+                underline_line = number + 1
+        if level:
+            if excluded_heading is not None and level <= excluded_heading:
+                excluded_heading = None
+            if (
+                is_example(title) or OPTIONAL_LEAD.match(title)
+                or exclude_condition(title, include_conditionals=include_conditionals)
+            ):
+                excluded_heading = level if excluded_heading is None else excluded_heading
+            elif title and excluded_heading is None:
+                yield number, title
+            excluded_paragraph = None
+            quoted = False
+            continue
+        if not quoted and excluded_heading is None:
+            if excluded_paragraph == "example":
+                continue
+            if excluded_paragraph == "example-intro":
+                # Plain example prose continues across blank lines up to the next heading.
+                excluded_paragraph = "example" if text and not text.startswith("<") else "body"
+                continue
+            label = text.replace("*", "").replace("_", "").strip()
+            introduces_context = label.endswith((":", ","))
+            example = is_example(label)
+            conditional = introduces_context and exclude_condition(
+                label, include_conditionals=include_conditionals,
+            )
+            if example or OPTIONAL_LEAD.match(label) or conditional:
+                if LIST.match(expanded.lstrip()):
+                    excluded_item = indent
+                elif example and introduces_context:
+                    excluded_paragraph = "example-intro"
+                else:
+                    excluded_paragraph = "awaiting" if introduces_context else "body"
+            elif excluded_paragraph:
+                excluded_paragraph = "body"
+            elif text and not MARKER_CANDIDATE.match(text):
+                yield number, text
+
+
+def names_output(text, path):
+    if path in INLINE_CODE.findall(text):
+        return True
+    unquoted = INLINE_CODE.sub("", text)
+    return re.search(
+        rf"(?<![\w./\\:-]){re.escape(path)}(?![\w/\\:-]|\.[\w.])", unquoted,
+    ) is not None
+
+
+def inventory(lines, start, root, run_id, *, step_inventory, supplied, revision):
     visible = dict(top_level_lines(lines, start))
     steps = []
     outputs = []
@@ -159,7 +291,28 @@ def inventory(lines, start, root, run_id, *, step_inventory, revision):
     elif not steps and not outputs:
         raise RequestError("The runbook has no declared steps")
 
-    deliverables = set()
+    fields(supplied, (), {step["id"] for step in steps}, "stepContracts")
+    deliverables = {}
+
+    def attach(number, value, owner, *, marker=False):
+        path = value.replace("{runId}", run_id)
+        require("{" not in path and "}" not in path, f"Invalid deliverable template at line {number}")
+        if path.startswith("repo:"):
+            path = path.removeprefix("repo:")
+        else:
+            private = relative_name(path, portable=True)
+            path = f"{run_artifacts(run_id)}/{private}"
+        path = protected_path(root, path, deliverable=True, run_id=run_id)
+        path = path.relative_to(root).as_posix()
+        if not marker and deliverables.get(path) == owner["id"]:
+            return
+        require(
+            not any(paths_overlap(path, seen) for seen in deliverables),
+            f"Colliding or overlapping deliverable path: {path}",
+        )
+        deliverables[path] = owner["id"]
+        owner["deliverables"].append(path)
+
     for number, value in outputs:
         owner = next((
             step for step in steps
@@ -167,15 +320,45 @@ def inventory(lines, start, root, run_id, *, step_inventory, revision):
         ), None)
         if owner is None:
             raise RequestError(f"Deliverable outside a step at line {number}")
-        path = value.replace("{runId}", run_id)
-        require("{" not in path and "}" not in path, f"Invalid deliverable template at line {number}")
-        path = protected_path(root, path, deliverable=True).relative_to(root).as_posix()
-        require(
-            not any(paths_overlap(path, seen) for seen in deliverables),
-            f"Colliding or overlapping deliverable path: {path}",
-        )
-        deliverables.add(path)
-        owner["deliverables"].append(path)
+        attach(number, value, owner, marker=True)
+
+    fence_starts = set()
+    prose_visible = dict(top_level_lines(lines, start, list_prose=True, fence_starts=fence_starts))
+    runbook_prose = dict(procedure_prose(
+        lines, prose_visible, {"startLine": start + 1, "endLine": len(lines)},
+        include_conditionals=True, fence_starts=fence_starts,
+    ))
+    for step in steps:
+        span = step["instruction"]
+        for number, text in procedure_prose(lines, prose_visible, span, fence_starts=fence_starts):
+            directive = WRITE_OUTPUT.fullmatch(text)
+            if directive and not QUALIFIED_OUTPUT.search(directive[1]):
+                attach(number, directive[2], step)
+
+        facts = supplied.get(step["id"], {})
+        require(isinstance(facts, dict), "Expected a step contract object")
+        citations = array(facts.get("outputs", []), "step contract outputs", empty=True)
+        if not citations:
+            continue
+        cited_prose = dict(procedure_prose(
+            lines, prose_visible, span, include_conditionals=True, fence_starts=fence_starts,
+        ))
+        for output in citations:
+            fields(output, ("line", "path", "sha256"), ("scope",), "output citation")
+            require(
+                sha256(output["sha256"]) == revision,
+                "Runbook changed after recognizing its outputs", "CONFLICT",
+            )
+            number = integer(output["line"], "output citation line")
+            value = string(output["path"], "output citation path")
+            scope = choice(output.get("scope", "step"), ("step", "runbook"), "output citation scope")
+            source = runbook_prose if scope == "runbook" else cited_prose
+            require(
+                number in source and names_output(source[number], value),
+                f"Output citation for step {step['id']} must name {value!r} "
+                f"in {scope} instructions at line {number}",
+            )
+            attach(number, value, step)
     return steps
 
 
@@ -185,6 +368,7 @@ def step_facts(root, raw, strict):
         (),
         (
             "procedure",
+            "outputs",
             "gapCauses",
             "reuse",
             "reassessAfterInvalidation",
@@ -239,10 +423,12 @@ def compile_contract(root, path, run_id, supplied, *, operator_family=None, step
             and not any(settings.get("dependsOn") for settings in overrides.values()),
             "stepInventory requires a sequential runbook with one slot and no dependency graph",
         )
-    steps = inventory(lines, body, root, run_id, step_inventory=step_inventory, revision=revision)
+    steps = inventory(
+        lines, body, root, run_id, step_inventory=step_inventory, supplied=supplied,
+        revision=revision,
+    )
     ids = {step["id"] for step in steps}
     explicit = props["_explicitModelSettings"]
-    fields(supplied, (), ids, "stepContracts")
     require(overrides.keys() <= ids, f"Unknown step overrides: {sorted(overrides.keys() - ids)}")
     contract = {
         key: props[key]

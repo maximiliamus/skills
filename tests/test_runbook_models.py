@@ -101,15 +101,18 @@ def test_edited_procedure_keeps_frozen_instructions_and_open_holds(repo):
     )
     view = client.status()
     assert view["contract"]["instructions"] == original
-    assert view["ready"] == ["review"]
+    assert not view["sourceMatches"] and view["ready"] == []
     assert client.step("prepare")["question"] == hold
     assert client.step("prepare")["attempt"] == first
     client.change("accept-revision", {}, code="INVALID_REQUEST")
     client.change("resolve", {"kind": "question", "hold": hold, "decision": DECISION})
     client.result(first)
-    client.result(client.admit("review"))
-    client.finish()
+    client.admit("review", code="BLOCKED")
     revised = Client(repo, client.path.read_text(encoding="utf-8"))
+    revised.initial["restart"] = {
+        "runId": client.run, "ifRevision": client.view["revision"],
+        "decision": DECISION, "evidence": EVIDENCE,
+    }
     assert revised.reserve()["contract"]["maxParallelSteps"] == 1
 
 

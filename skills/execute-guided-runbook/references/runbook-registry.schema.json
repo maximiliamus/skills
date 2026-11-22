@@ -12,6 +12,10 @@
       "type": "integer",
       "const": 2
     },
+    "journalRetention": {
+      "allOf": [{"$ref": "#/definitions/journalRetention"}],
+      "default": 3
+    },
     "runbooks": {
       "type": "array",
       "items": {
@@ -40,6 +44,9 @@
             "type": "string",
             "minLength": 1,
             "pattern": "\\S"
+          },
+          "journalRetention": {
+            "$ref": "#/definitions/journalRetention"
           }
         },
         "additionalProperties": false
@@ -48,6 +55,15 @@
     "stateDirectory": {
       "const": ".runbooks",
       "default": ".runbooks"
+    }
+  },
+  "definitions": {
+    "journalRetention": {
+      "description": "Number of runs to keep per runbook, including the current run, or all.",
+      "oneOf": [
+        {"type": "integer", "minimum": 1},
+        {"const": "all"}
+      ]
     }
   },
   "additionalProperties": false

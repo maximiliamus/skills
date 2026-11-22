@@ -175,7 +175,8 @@ class Client:
 
     @property
     def path_to_journal(self):
-        return self.repo / ".runbooks" / "runs" / f"{self.run}.json"
+        old = self.repo / ".runbooks" / "runs" / f"{self.run}.json"
+        return old if old.exists() else self.repo / ".runbooks" / "history" / self.run / "journal.json"
 
     def journal(self):
         return json.loads(self.path_to_journal.read_bytes())
@@ -229,7 +230,11 @@ class Client:
         return self.observe(attempt, "result", outcome="PASS" if passed else "FAIL", code=code, **extra)
 
     def stage(self, attempt, target, text, *, prior=None):
-        staged = f".runbooks/staging/{self.run}/{attempt}/{Path(target).name}"
+        prefix = (
+            f".runbooks/staging/{self.run}" if self.path_to_journal.parent.name == "runs"
+            else f".runbooks/history/{self.run}/staging"
+        )
+        staged = f"{prefix}/{attempt}/{target}"
         path = self.repo / staged
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
@@ -260,10 +265,11 @@ def test_v4_parked_run_resumes_with_original_order_and_outcomes(repo):
     original = fixture.read_bytes()
     journal = json.loads(original)
     client = Client(repo, journal["contract"]["instructions"], relative=journal["runbook"]["path"])
+    client.path.write_bytes(journal["contract"]["instructions"].encode("utf-8"))
     call(repo, "register", "review-docs", "run.md")
     client.run = journal["runId"]
     client.token = journal["events"][0]["data"]["ownershipToken"]
-    path = client.path_to_journal
+    path = repo / ".runbooks" / "runs" / f"{client.run}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(original)
 
@@ -292,6 +298,7 @@ def test_v4_parked_run_resumes_with_original_order_and_outcomes(repo):
             "procedure": [artifact(repo, "run.md") | {"section": "Second check"}],
         },
     })
+    new.path.write_bytes(journal["contract"]["instructions"].encode("utf-8"))
     view = new.reserve(selector="review-docs")
     assert view["schemaVersion"] == 5 and view["ready"] == ["first"]
     new.result(new.admit("first"))
@@ -331,7 +338,7 @@ def test_cli_wire_contract_and_registry_lifecycle(repo):
     final = client.finish()
     assert final["result"] == "PASSED" and final["phase"] == "finalized"
     assert client.status()["score"] == {"earned": 1, "available": 1}
-    call(repo, "status", "publish", code="NOT_FOUND")
+    assert call(repo, "status", "publish")["runId"] == client.run
     assert call(repo, "unregister", "publish")["runbooks"] == []
     assert client.path.exists()
     assert client.path_to_journal.exists()
@@ -402,10 +409,13 @@ These notes are outside the steps.
     assert "## Notes" not in step_body(frozen["steps"][1])
     client.admit("report", decision=DECISION, code="BLOCKED")
     client.result(client.admit("verify-inputs"))
+    original_source = client.path.read_bytes()
     client.path.write_text("# Revised worktree\n", encoding="utf-8")
     assert client.status("delivery")["contract"] == frozen
-    assert client.view["ready"] == ["report"]
+    assert not client.view["sourceMatches"] and client.view["ready"] == []
     assert client.reserve(selector="delivery")["duplicate"]
+    client.admit("report", code="BLOCKED")
+    client.path.write_bytes(original_source)
     client.admit("report")
     assert client.journal()["contract"] == frozen
 
@@ -418,7 +428,7 @@ def test_unmarked_ordered_steps_capture_local_content_and_deliverable(repo):
         "   - Include the changed files.\n"
         "2. Publish the report\n"
         "   Use the verified inputs.\n\n"
-        "<!-- deliverable: reports/{runId}/report.md -->\n\n"
+        "<!-- deliverable: repo:reports/{runId}/report.md -->\n\n"
         "## Notes\n\nThe repository rules govern access.\n",
     )
     client.initial["stepInventory"] = inferred_inventory(
@@ -611,7 +621,7 @@ def test_v2_journal_and_archives_stay_in_place_with_zero_progress_on_restart(rep
     assert all(step["charged"] == 0 and step["assessment"] is None for step in reserved["steps"])
     assert all(path.read_bytes() == saved for path, saved in before.items())
     assert client.journal()["schemaVersion"] == 5
-    assert client.path_to_journal.stem == client.run
+    assert client.path_to_journal.parent.name == client.run
 
 
 def test_failed_atomic_replace_keeps_previous_revision_and_request_retryable(
@@ -658,7 +668,9 @@ def test_registry_identifier_never_becomes_a_journal_filename(repo, identifier):
     client.reserve(selector=identifier)
     assert client.path_to_journal.is_file()
     assert client.journal()["runbook"]["id"] == identifier
-    assert list(client.path_to_journal.parent.iterdir()) == [client.path_to_journal]
+    assert {path.name for path in client.path_to_journal.parent.iterdir()} == {
+        ".runbook-session", "artifacts", "journal.json",
+    }
 
 
 def test_physical_runbook_alias_cannot_open_a_second_run(repo):

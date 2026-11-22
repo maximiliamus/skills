@@ -9,7 +9,7 @@ import unicodedata
 from pathlib import PureWindowsPath
 from uuid import UUID
 
-from .model import RunbookError
+from .model import RUN_FOLDER_MARKER, RunbookError
 from .storage import inside_repo
 
 
@@ -149,14 +149,30 @@ def paths_overlap(first, second):
     return left[:count] == right[:count]
 
 
-def protected_path(root, value, *, deliverable=False):
+def run_artifacts(run_id):
+    return f".runbooks/history/{run_id}/artifacts"
+
+
+def run_staging(run_id, *, flat):
+    return f".runbooks/staging/{run_id}" if flat else f".runbooks/history/{run_id}/staging"
+
+
+def protected_path(root, value, *, deliverable=False, run_id=None, flat=False):
     """Inspect each component without following links, including inside the repository."""
     parts = relative_name(value, portable=True).split("/")
     if deliverable:
         reserved = {".git", "execute-guided-runbook.json"}
         if parts[0].casefold() == ".runbooks":
+            private = run_id is not None and value.startswith(run_artifacts(run_id) + "/")
+            legacy_target = (
+                flat and len(parts) >= 3 and parts[1].casefold() == "history"
+                and not (root / ".runbooks" / "history" / parts[2] / RUN_FOLDER_MARKER).exists()
+            )
             require(
-                len(parts) >= 3 and parts[1].casefold() not in {"runs", ".locks", "archive", "staging"},
+                private or legacy_target or (
+                    len(parts) >= 3
+                    and parts[1].casefold() not in {"history", "runs", ".locks", "archive", "staging"}
+                ),
                 f"Deliverable targets runbook state: {value}",
             )
         require(

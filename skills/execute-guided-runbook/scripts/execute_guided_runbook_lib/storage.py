@@ -27,7 +27,7 @@ from .model import (
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def serialize_json(payload: Any, *, subject: str) -> str:

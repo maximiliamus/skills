@@ -1,9 +1,10 @@
 """Replay a local run journal without depending on an execution harness."""
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from .model import LEGACY_JOURNAL_SCHEMA_VERSION, VERIFIED_OUTCOMES, RunbookError
-from .validation import artifact, matches_digest, protected_path, require
+from .validation import artifact, integer, matches_digest, protected_path, require
 
 
 @dataclass
@@ -51,8 +52,9 @@ class Step:
 
 
 class Run:
-    def __init__(self, root, journal):
+    def __init__(self, root, journal, *, flat=False):
         self.root = root
+        self.flat = flat
         self.journal = journal
         self.run_id = journal["runId"]
         self.runbook = journal["runbook"]
@@ -73,6 +75,8 @@ class Run:
         self.intents = {}
         self.model_overrides = {}
         self.pause = None
+        self.paused_at = None
+        self.last_step = None
         self.pause_question = None
         self.terminal = None
         self.result = None
@@ -85,6 +89,13 @@ class Run:
                 "IO_ERROR",
             )
             self.apply(event)
+        self.started = datetime.fromisoformat(self.events[0]["at"])
+        require(self.started.tzinfo is not None, "Missing start time zone", "IO_ERROR")
+        reservation = self.events[0]["data"]
+        self.reservation_order = (
+            integer(reservation["reservationOrder"], "reservation order")
+            if "reservationOrder" in reservation else 0
+        )
 
     @property
     def revision(self):
@@ -93,6 +104,17 @@ class Run:
     @property
     def available_slots(self):
         return self.contract["maxParallelSteps"] - sum(a.live for a in self.attempts.values())
+
+    @property
+    def pending_effects(self):
+        return any(attempt.effects_pending for attempt in self.attempts.values())
+
+    @property
+    def settled(self):
+        return (
+            not self.intents and not self.pending_effects
+            and not any(attempt.live for attempt in self.attempts.values())
+        )
 
     @property
     def phase(self):
@@ -111,6 +133,15 @@ class Run:
         if kind != "publication-intent":
             self.requests[event["requestId"]] = event
         getattr(self, "apply_" + kind.replace("-", "_"))(seq, data)
+        if self.pause is None:
+            self.paused_at = None
+        elif (kind == "set-pause" or self.paused_at is None) and self.phase == "paused":
+            self.paused_at = event["at"]
+        step = data.get("stepId")
+        if step is None and "attempt" in data:
+            step = self.attempts[data["attempt"]].data["stepId"]
+        if step is not None:
+            self.last_step = step
 
     def apply_reserve(self, seq, data):
         self.owner = self.events[seq - 1]
@@ -243,8 +274,11 @@ class Run:
 
     def record_current(self, reference, *, deliverable=False):
         try:
-            path = (protected_path(self.root, reference["path"], deliverable=True)
-                    if deliverable else artifact(self.root, reference))
+            path = (
+                protected_path(self.root, reference["path"], deliverable=True, run_id=self.run_id,
+                               flat=self.flat)
+                if deliverable else artifact(self.root, reference)
+            )
             return matches_digest(path, reference["sha256"])
         except (RunbookError, OSError, ValueError):
             return False
@@ -388,6 +422,10 @@ class Run:
             "schemaVersion": self.journal["schemaVersion"],
             "runId": self.run_id,
             "revision": self.revision,
+            "startedAt": self.events[0]["at"],
+            "lastActivityAt": self.events[-1]["at"],
+            "pausedAt": self.paused_at,
+            "lastStepId": self.last_step,
             "phase": self.phase,
             "pause": self.pause,
             "pauseQuestion": {"event": self.pause_question, **self.questions[self.pause_question]}
