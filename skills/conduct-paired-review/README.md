@@ -1,8 +1,10 @@
 # Conduct Paired Review
 
-Discuss a file (functionality description, proposal prepared, review results)
-with two models acting as author and critic. They exchange Markdown replies
-and agree on a plan to improve the intent or functionality described in that file.
+Review a source file or specified project functionality with two models acting
+as author and critic. They exchange Markdown replies and agree on improvements.
+The starting file can be a proposal, a description, a file from the project or
+an initial review. Both models work from the project root and read relevant
+context directly.
 
 There are two goals: **refine the original intent** and **improve existing
 functionality**. The skill derives the goal from your initial request and context.
@@ -96,6 +98,21 @@ Only a separate `clean` command removes the replies and plan, either afterward
 or when you abandon the plan. It preserves the original document, including an
 initial functionality review and its accepted plan. If nothing remains to delete,
 it replies `nothing to do`.
+
+## Start With Project Functionality
+
+Name the functionality to review and omit the starting file.
+
+```text
+$conduct-paired-review Review runbook history retention in this project
+```
+
+The critic first investigates the requested functionality and saves its report
+as an original source file such as `runbook-history-review.md` at the project
+root. You can specify a different report path. The author then writes
+`runbook-history-review-R01A.md` and creates the plan beside the report. The
+critic's next reply is `runbook-history-review-R02C.md`.
+See [the functionality workflow](references/functionality.md#start-with-project-functionality).
 
 ## Start From An Existing Review
 

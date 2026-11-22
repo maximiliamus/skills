@@ -1,4 +1,35 @@
-# Starting From An Existing Review
+# Review Existing Functionality
+
+## Start With Project Functionality
+
+When the operator specifies existing functionality to review without a starting
+file, identify the project's root and the requested scope from the operator's
+context. Resolve both participants before dispatching the critic. Ask for
+clarification if the project or functionality cannot be identified.
+
+Use the operator's destination when specified and resolve relative destinations
+from the project root. Otherwise, choose `<functionality>-review.md` in that
+root, with a short lowercase ASCII name for the functionality. Check that the
+report path and its dialogue filenames are unused. Report a conflict at an
+explicit destination or choose an unused default name.
+
+Run the critic from the project root. Give it the scope and any paths the
+operator supplied as evidence. The critic inspects the project directly and
+produces an English Markdown report that identifies the project root and scope,
+states the findings or their absence, and records the evidence. After validating
+delivery, save the critic's exact report as an unnumbered source document
+without overwriting an existing file. A failed initial review leaves the report
+and dialogue pending.
+
+Continue from that file as a review written by the critic. The initial report
+needs no reply frontmatter and carries no approval. The author opens the report
+and the relevant project files, then writes `<source-stem>-R01A.md` and
+`<source-stem>-RP.md` beside the report. The critic replies in
+`<source-stem>-R02C.md`. Use the ordinary consensus, apply and cleanup rules.
+For example, a runbook history review can start with `runbook-history-review.md`,
+followed by `runbook-history-review-R01A.md`.
+
+## Start From An Existing Review
 
 The initial prompt determines the goal: refine the original intent or improve
 existing functionality described in the original document. A prepared review may

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Start a paired review by naming the project functionality you want to
+  improve. The first reviewer writes the report that anchors the discussion
+  and preserves the initial findings.
+
 ## [0.4.0] - 2026-11-21
 
 - Use `conduct-paired-review` to review proposals, plans, and existing

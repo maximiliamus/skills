@@ -8,10 +8,13 @@ model identities from runtime metadata or a documented dispatch contract, not a
 model's self-description. Labels such as Codex or Claude are not model IDs.
 Never silently substitute a model or have one model impersonate both roles.
 
-Read relevant project instructions and evidence. Give the first critic fresh
-context; subsequent turns receive the current plan, latest opponent reply and
-relevant earlier responses. Send the participant its role and dialogue rules;
-include the plan format when the author needs to create or update the plan.
+Run both participants from the project root. Give them the original file's path
+and let them open that file and related project evidence directly. For an initial
+review of specified functionality without a source file, give the critic the
+requested scope instead. Subsequent turns receive the paths to the current plan,
+latest opponent reply and relevant earlier responses. Send the participant its
+role and dialogue rules; include the plan format when the author needs to create
+or update the plan.
 Use the client's dedicated agent or system-instruction channel for this role
 when available, while preserving its tool permissions and approval settings.
 Do not add output-length targets or demand a fixed report structure. Each
